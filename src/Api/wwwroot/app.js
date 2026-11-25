@@ -1228,6 +1228,7 @@ function renderDetailShell(game) {
     <nav class="tabs" id="tabs">
       ${[
         ["analisis", "Análisis"],
+        ["radar", "Radar"],
         ["estadisticas", "Estadísticas"],
         ["alineaciones", "Alineaciones"],
         ["jugadores", "Jugadores"],
@@ -1261,6 +1262,7 @@ async function showTab(tab) {
   let html;
   try {
     if (tab === "analisis") html = await panelAnalisis(id, league);
+    else if (tab === "radar") html = await panelRadar(id, league);
     else if (tab === "estadisticas") html = await panelEstadisticas(id, league);
     else if (tab === "alineaciones") html = await panelAlineaciones(id, league);
     else if (tab === "jugadores") html = await panelJugadores(id, league);
@@ -1493,6 +1495,172 @@ function shotMapHTML(tiros, homeName, awayName) {
         <span>${tiros.length} tiros · tamaño = xG · borde blanco = gol</span>
       </div>
     </section>`;
+}
+
+/* ---------- pestaña: radar ---------- */
+// Cifras de FotMob que se pintan en el radar. Se aceptan los títulos en
+// inglés y en español porque la API los devuelve en el idioma que quiere.
+const RADAR_METRICS = [
+  { label: "Posesión", test: /possession|posesi[oó]n/i },
+  { label: "Tiros", test: /^(total shots|tiros|remates)$/i },
+  { label: "Tiros a puerta", test: /on target|a puerta/i },
+  { label: "Pases precisos", test: /^(accurate passes|pases precisos|pases completados)$/i },
+  { label: "Córners", test: /^(corners|c[oó]rners)$/i },
+  { label: "Duelos ganados", test: /^(duels won|duelos ganados)$/i },
+  { label: "xG", test: /expected goals|\bxg\b/i },
+];
+
+// "97 (81%)" → 81: para comparar pases se usa el porcentaje, no el total.
+function metricValue(value) {
+  if (Array.isArray(value)) return null;
+  if (typeof value === "string") {
+    const p = value.match(/(\d+(?:[.,]\d+)?)\s*%/);
+    if (p) return parseFloat(p[1].replace(",", "."));
+  }
+  return num(value);
+}
+
+// Cada eje se escala al mejor de los dos equipos (1 = el que más suma), así el
+// radar funciona igual con partidos de 40 tiros que con partidos de 4.
+function radarMetrics(grupos) {
+  const rows = [];
+  for (const g of grupos || []) for (const f of g?.filas || []) rows.push(f);
+
+  const seen = new Set();
+  const metrics = [];
+  for (const def of RADAR_METRICS) {
+    if (metrics.length >= 6) break;
+    const i = rows.findIndex(
+      (f, idx) => !seen.has(idx) && def.test.test(String(f?.etiqueta || ""))
+    );
+    if (i < 0) continue;
+    seen.add(i);
+
+    const home = metricValue(rows[i].local);
+    const away = metricValue(rows[i].visita);
+    if (home == null || away == null) continue;
+    const max = Math.max(home, away);
+    if (!max) continue;
+
+    metrics.push({
+      label: def.label,
+      homeText: txt(rows[i].local),
+      awayText: txt(rows[i].visita),
+      homeRatio: home / max,
+      awayRatio: away / max,
+    });
+  }
+  return metrics;
+}
+
+function radarSVG(metrics, homeColor, awayColor, homeName, awayName) {
+  if (!metrics || metrics.length < 3) return "";
+
+  const n = metrics.length;
+  const cx = 170;
+  const cy = 144;
+  const R = 92;
+  const angle = (i) => -Math.PI / 2 + (i * 2 * Math.PI) / n;
+  const at = (i, r) => [cx + Math.cos(angle(i)) * r, cy + Math.sin(angle(i)) * r];
+  const ring = (k) =>
+    metrics.map((_, i) => at(i, R * k).map((v) => v.toFixed(1)).join(",")).join(" ");
+
+  const shape = (key, color, fillOpacity) => {
+    const points = metrics
+      .map((m, i) => at(i, R * Math.max(0.05, m[key])).map((v) => v.toFixed(1)).join(","))
+      .join(" ");
+    const dots = metrics
+      .map((m, i) => {
+        const [x, y] = at(i, R * Math.max(0.05, m[key]));
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.2" fill="${esc(color)}" />`;
+      })
+      .join("");
+    return `<polygon points="${points}" fill="${esc(color)}" fill-opacity="${fillOpacity}" stroke="${esc(
+      color
+    )}" stroke-width="1.6" stroke-linejoin="round" />${dots}`;
+  };
+
+  const axes = metrics
+    .map((_, i) => {
+      const [x, y] = at(i, R);
+      return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(
+        1
+      )}" stroke="rgba(255,255,255,.10)" />`;
+    })
+    .join("");
+
+  const labels = metrics
+    .map((m, i) => {
+      const [x, y] = at(i, R + 14);
+      const cos = Math.cos(angle(i));
+      const anchor = Math.abs(cos) < 0.25 ? "middle" : cos > 0 ? "start" : "end";
+      return `<text x="${x.toFixed(1)}" y="${(y + 3.4).toFixed(1)}" text-anchor="${anchor}" class="radar-label">${esc(
+        m.label
+      )}</text>`;
+    })
+    .join("");
+
+  return `
+    <div class="radar">
+      <svg class="radar-svg" viewBox="0 0 340 288" role="img" aria-label="Radar comparativo de los dos equipos">
+        ${[0.25, 0.5, 0.75, 1]
+          .map((k) => `<polygon points="${ring(k)}" fill="none" stroke="rgba(255,255,255,.10)" />`)
+          .join("")}
+        ${axes}
+        ${shape("awayRatio", awayColor, 0.14)}
+        ${shape("homeRatio", homeColor, 0.2)}
+        ${labels}
+      </svg>
+      <div class="radar-teams">
+        <span></span>
+        <span>${esc(homeName || "Local")}</span>
+        <span>${esc(awayName || "Visitante")}</span>
+      </div>
+      <ul class="radar-legend">
+        ${metrics
+          .map(
+            (m) => `<li><span class="rd-name">${esc(m.label)}</span>
+              <b style="color:${esc(homeColor)}">${esc(m.homeText)}</b>
+              <b style="color:${esc(awayColor)}">${esc(m.awayText)}</b></li>`
+          )
+          .join("")}
+      </ul>
+    </div>`;
+}
+
+async function panelRadar(id, league) {
+  const data = await loadStats(id, league);
+  const { home, away } = sidesOf(state.game?.raw);
+  const colorOf = (side) =>
+    state.game?.raw?.teams?.find((t) => t.homeAway === side)?.color ||
+    (side === "home" ? "#22d07a" : "#3a7aff");
+
+  const radar = radarSVG(radarMetrics(data?.grupos), colorOf("home"), colorOf("away"), home?.name, away?.name);
+  const momentum = momentumSVG(data?.momento);
+  const shotMap = shotMapHTML(data?.tiros, home?.name, away?.name);
+
+  if (!radar && !momentum && !shotMap) {
+    return emptyHTML(
+      "Sin radar disponible",
+      data?.motivo || "FotMob todavía no publicó estadísticas de este partido."
+    );
+  }
+
+  const faltan = [];
+  if (!shotMap) faltan.push("el mapa de tiros");
+  if (!momentum) faltan.push("el gráfico de dominio");
+
+  return (
+    (radar
+      ? `<section class="dcard"><h3>Radar del partido</h3>${radar}
+          <p class="muted small radar-note">Cada eje se escala al mejor de los dos equipos.</p></section>`
+      : "") +
+    momentum +
+    shotMap +
+    (faltan.length
+      ? `<p class="muted small radar-note">FotMob no publicó ${faltan.join(" ni ")} de este partido.</p>`
+      : "")
+  );
 }
 
 async function panelEstadisticas(id, league) {
