@@ -336,6 +336,7 @@ function mapGame(detail, id) {
     clock: clockOf(st),
     teams,
     head_to_head: h2hGames(detail),
+    h2h_summary: Array.isArray(detail?.content?.h2h?.summary) ? detail.content.h2h.summary : null,
   };
 }
 
@@ -1818,6 +1819,7 @@ async function panelH2H() {
   const game = state.game?.raw || {};
   const { home, away } = sidesOf(game);
   const h2h = game.head_to_head || [];
+  const resumen = game.h2h_summary;
   const recent = (t) => (t?.recent_games || []).slice(0, 5);
 
   const block = (team, list) => `
@@ -1833,8 +1835,8 @@ async function panelH2H() {
     `<section class="dcard"><h3>Cara a cara</h3>
       ${
         h2h.length
-          ? `<ul class="mini-list">${h2h.slice(0, 8).map(miniMatch).join("")}</ul>`
-          : `<p class="muted small">La API no devolvió enfrentamientos previos.</p>`
+          ? `${resumen ? `<p class="muted small">${esc(home?.name || "Local")} ${esc(resumen[0])} · Empates ${esc(resumen[1])} · ${esc(away?.name || "Visitante")} ${esc(resumen[2])}</p>` : ""}<ul class="mini-list">${h2h.slice(0, 8).map(miniMatch).join("")}</ul>`
+          : `<p class="muted small">Estos equipos no se han enfrentado antes (o FotMob no tiene ese historial).</p>`
       }
     </section>`;
 
