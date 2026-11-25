@@ -152,7 +152,7 @@ function mapListMatch(match, league) {
   return {
     id: String(match.id),
     league: league.name || "",
-    league_code: String(league.id ?? ""),
+    league_code: String(league.code ?? league.id ?? ""),
     date: st.utcTime || null,
     state: stateOf(st),
     status: st.reason?.short || (st.cancelled ? "Cancelado" : ""),
@@ -329,7 +329,7 @@ function mapGame(detail, id) {
   return {
     id: String(general.matchId || id),
     league: general.leagueName || "",
-    league_code: String(general.leagueId ?? ""),
+    league_code: String(general.parentLeagueId ?? general.leagueId ?? ""),
     date: st.utcTime || general.matchTimeUTC || null,
     state: stateOf(st),
     status: st.reason?.short || "",
