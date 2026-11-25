@@ -1228,7 +1228,6 @@ function renderDetailShell(game) {
     <nav class="tabs" id="tabs">
       ${[
         ["analisis", "Análisis"],
-        ["radar", "Radar"],
         ["estadisticas", "Estadísticas"],
         ["alineaciones", "Alineaciones"],
         ["jugadores", "Jugadores"],
@@ -1253,7 +1252,6 @@ function renderDetailShell(game) {
 
 async function showTab(tab) {
   if (!state.game) return;
-  stopRadar();
   state.tab = tab;
   el.detail.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   const panel = $("#panel");
@@ -1263,7 +1261,6 @@ async function showTab(tab) {
   let html;
   try {
     if (tab === "analisis") html = await panelAnalisis(id, league);
-    else if (tab === "radar") html = await panelRadar(id, league);
     else if (tab === "estadisticas") html = await panelEstadisticas(id, league);
     else if (tab === "alineaciones") html = await panelAlineaciones(id, league);
     else if (tab === "jugadores") html = await panelJugadores(id, league);
@@ -1495,164 +1492,6 @@ function shotMapHTML(tiros, homeName, awayName) {
         <span><i style="background:${esc(awayColor)}"></i>${esc(awayName || "Visitante")}</span>
         <span>${tiros.length} tiros · tamaño = xG · borde blanco = gol</span>
       </div>
-    </section>`;
-}
-
-/* ---------- pestaña: radar (widget de Sportradar, el mismo que usa FotMob) ---------- */
-// FotMob no dibuja el radar: monta el "Live Match Tracker" de Sportradar con
-// su SDK. Aquí se hace igual, así que el campo, el balón y las acciones se
-// mueven solos (el widget pide match_timelinedelta cada pocos segundos).
-const SIR_KEY = "44ea55a6918bd96cab0f7c854ad171ab";
-const SIR_LOADER = `https://widgets.sir.sportradar.com/${SIR_KEY}/widgetloader`;
-const SIR_CONFIG = {
-  vlmtForce2d: true,
-  pitchView: "top",
-  vlmtLightPitchView: "top",
-  layout: "topdown",
-  disableWidgetHeader: true,
-  disableComponents: false,
-  momentum: "disable",
-  scoreboard: "disable",
-  disableFooterStats: true,
-  disableEventStats: true,
-  tabs: { 1: ["statistics"] },
-  tabsPosition: "disable",
-  collapseTo: "pitch",
-  expanded: false,
-  hideExpand: true,
-  disableOverlayPanels: true,
-  vlmtEnableMilestones: false,
-  detailedScoreboard: "disable",
-};
-
-let sirCarga = null;
-let radarHost = null;
-
-function cargarSIR() {
-  if (window.SIR && !window.SIR.q) return Promise.resolve(true);
-  if (sirCarga) return sirCarga;
-  if (!window.SIR) {
-    const stub = function () {
-      (stub.q = stub.q || []).push(arguments);
-    };
-    stub.l = Date.now();
-    window.SIR = stub;
-  }
-  sirCarga = new Promise((resolve) => {
-    const s = document.createElement("script");
-    s.async = true;
-    s.src = SIR_LOADER;
-    s.dataset.sirLoader = "1";
-    const esperar = (ms) => {
-      const t0 = Date.now();
-      const t = setInterval(() => {
-        const listo = window.SIR && !window.SIR.q;
-        if (listo || Date.now() - t0 > ms) {
-          clearInterval(t);
-          resolve(listo);
-        }
-      }, 80);
-    };
-    s.onload = () => esperar(4000);
-    s.onerror = () => esperar(1000);
-    document.head.appendChild(s);
-  });
-  return sirCarga;
-}
-
-/** Suelta el widget al cambiar de pestaña o de partido (si no, sigue pidiendo datos). */
-function stopRadar() {
-  const host = radarHost;
-  radarHost = null;
-  if (!host) return;
-  try {
-    window.SIR && window.SIR("removeWidget", host);
-  } catch {
-    /* el widget ya no existía */
-  }
-}
-
-function srMatchId(detail) {
-  const url = detail?.content?.superlive?.superLiveUrl || "";
-  const m = String(url).match(/srmatchid=sr:match:(\d+)/);
-  return m ? m[1] : "";
-}
-
-async function loadRadar(sr) {
-  try {
-    const res = await fetch(`/api/radar/${encodeURIComponent(sr)}`, { headers: { Accept: "application/json" } });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) return { ok: false, motivo: data?.message || `La API respondió ${res.status}` };
-    return data;
-  } catch (err) {
-    return { ok: false, motivo: err.message };
-  }
-}
-
-async function montarLMT(sr) {
-  let host = null;
-  for (let i = 0; i < 60 && !host; i++) {
-    if (state.tab !== "radar" || state.view !== "detail") return;
-    host = document.querySelector("#panel .lmt-host");
-    if (!host) await new Promise((r) => setTimeout(r, 50));
-  }
-  if (!host) return;
-
-  const listo = await cargarSIR();
-  if (!host.isConnected || state.tab !== "radar") return;
-  if (!listo) {
-    host.innerHTML = `<p class="muted small">No se pudo cargar el radar de Sportradar. Revisa la conexión y recarga.</p>`;
-    return;
-  }
-
-  stopRadar();
-  radarHost = host;
-  try {
-    window.SIR("addWidget", host, "match.lmtPlus", { ...SIR_CONFIG, matchId: Number(sr), lang: "es" });
-  } catch (err) {
-    host.innerHTML = `<p class="muted small">El radar no arrancó: ${esc(err.message)}</p>`;
-  }
-}
-
-async function panelRadar(id) {
-  const detail = await loadDetail(id);
-  const sr = srMatchId(detail);
-  if (!sr) {
-    return emptyHTML(
-      "Sin radar en vivo",
-      "FotMob no publica el radar de este partido: solo lo tiene en los que sigue en directo con datos de Sportradar."
-    );
-  }
-
-  const data = await loadRadar(sr);
-  if (!data?.ok) {
-    return emptyHTML("Sin radar en vivo", data?.motivo || "El radar no devolvió datos de este partido.");
-  }
-
-  const local = data.local || {};
-  const visita = data.visitante || {};
-  const raw = state.game?.raw;
-  const colorOf = (side) =>
-    raw?.teams?.find((t) => t.homeAway === side)?.color || (side === "home" ? "#22d07a" : "#3a7aff");
-  const marcador =
-    local.marcador != null && visita.marcador != null ? `${local.marcador} - ${visita.marcador}` : "–";
-  const reloj = data.minuto != null ? `${data.minuto}'` : data.estado || "";
-
-  setTimeout(() => montarLMT(sr), 0);
-
-  return `
-    <section class="dcard radar-live">
-      <h3>Radar en vivo ${data.enVivo ? '<span class="rp-live"><i></i>en directo</span>' : ""}</h3>
-      <div class="rp-head">
-        <span class="rp-team"><i style="background:${esc(colorOf("home"))}"></i>${esc(local.nombre || "Local")}</span>
-        <span class="rp-clock">${esc(reloj)}</span>
-        <b class="rp-score">${esc(marcador)}</b>
-        <span class="rp-team a">${esc(visita.nombre || "Visitante")}<i style="background:${esc(
-    colorOf("away")
-  )}"></i></span>
-      </div>
-      <div class="lmt-host" id="lmtHost"><p class="muted small">Cargando el radar de Sportradar…</p></div>
-      <p class="muted small radar-note">Widget de Sportradar (Live Match Tracker), el mismo que usa FotMob. Se actualiza solo.</p>
     </section>`;
 }
 
