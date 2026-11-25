@@ -1253,6 +1253,7 @@ function renderDetailShell(game) {
 
 async function showTab(tab) {
   if (!state.game) return;
+  stopRadar();
   state.tab = tab;
   el.detail.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   const panel = $("#panel");
@@ -1497,170 +1498,178 @@ function shotMapHTML(tiros, homeName, awayName) {
     </section>`;
 }
 
-/* ---------- pestaña: radar ---------- */
-// Cifras de FotMob que se pintan en el radar. Se aceptan los títulos en
-// inglés y en español porque la API los devuelve en el idioma que quiere.
-const RADAR_METRICS = [
-  { label: "Posesión", test: /possession|posesi[oó]n/i },
-  { label: "Tiros", test: /^(total shots|tiros|remates)$/i },
-  { label: "Tiros a puerta", test: /on target|a puerta/i },
-  { label: "Pases precisos", test: /^(accurate passes|pases precisos|pases completados)$/i },
-  { label: "Córners", test: /^(corners|c[oó]rners)$/i },
-  { label: "Duelos ganados", test: /^(duels won|duelos ganados)$/i },
-  { label: "xG", test: /expected goals|\bxg\b/i },
-];
+/* ---------- pestaña: radar (Live Match Tracker de FotMob) ---------- */
+// FotMob pinta el radar del partido con el "Live Match Tracker" de Sportradar:
+// un campo con el balón, los ataques y las acciones, minuto a minuto. El visor
+// pide esos mismos datos al servidor (/api/radar/{srMatchId}), que firma el
+// acceso igual que FotMob y devuelve solo lo necesario para dibujarlo.
+const RADAR_MS = 15000;
+let radarTimer = null;
 
-// "97 (81%)" → 81: para comparar pases se usa el porcentaje, no el total.
-function metricValue(value) {
-  if (Array.isArray(value)) return null;
-  if (typeof value === "string") {
-    const p = value.match(/(\d+(?:[.,]\d+)?)\s*%/);
-    if (p) return parseFloat(p[1].replace(",", "."));
+function stopRadar() {
+  if (radarTimer) {
+    clearInterval(radarTimer);
+    radarTimer = null;
   }
-  return num(value);
 }
 
-// Cada eje se escala al mejor de los dos equipos (1 = el que más suma), así el
-// radar funciona igual con partidos de 40 tiros que con partidos de 4.
-function radarMetrics(grupos) {
-  const rows = [];
-  for (const g of grupos || []) for (const f of g?.filas || []) rows.push(f);
-
-  const seen = new Set();
-  const metrics = [];
-  for (const def of RADAR_METRICS) {
-    if (metrics.length >= 6) break;
-    const i = rows.findIndex(
-      (f, idx) => !seen.has(idx) && def.test.test(String(f?.etiqueta || ""))
-    );
-    if (i < 0) continue;
-    seen.add(i);
-
-    const home = metricValue(rows[i].local);
-    const away = metricValue(rows[i].visita);
-    if (home == null || away == null) continue;
-    const max = Math.max(home, away);
-    if (!max) continue;
-
-    metrics.push({
-      label: def.label,
-      homeText: txt(rows[i].local),
-      awayText: txt(rows[i].visita),
-      homeRatio: home / max,
-      awayRatio: away / max,
-    });
-  }
-  return metrics;
+function srMatchId(detail) {
+  const url = detail?.content?.superlive?.superLiveUrl || "";
+  const m = String(url).match(/srmatchid=sr:match:(\d+)/);
+  return m ? m[1] : "";
 }
 
-function radarSVG(metrics, homeColor, awayColor, homeName, awayName) {
-  if (!metrics || metrics.length < 3) return "";
+async function loadRadar(sr) {
+  try {
+    const res = await fetch(`/api/radar/${encodeURIComponent(sr)}`, { headers: { Accept: "application/json" } });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, motivo: data?.message || `La API respondió ${res.status}` };
+    return data;
+  } catch (err) {
+    return { ok: false, motivo: err.message };
+  }
+}
 
-  const n = metrics.length;
-  const cx = 170;
-  const cy = 144;
-  const R = 92;
-  const angle = (i) => -Math.PI / 2 + (i * 2 * Math.PI) / n;
-  const at = (i, r) => [cx + Math.cos(angle(i)) * r, cy + Math.sin(angle(i)) * r];
-  const ring = (k) =>
-    metrics.map((_, i) => at(i, R * k).map((v) => v.toFixed(1)).join(",")).join(" ");
+const RADAR_TIPOS = {
+  goal: { cls: "goal", label: "Gol" },
+  shotontarget: { cls: "shot on", label: "Tiro a puerta" },
+  shotofftarget: { cls: "shot", label: "Tiro" },
+  shotblocked: { cls: "shot", label: "Tiro bloqueado" },
+  corner: { cls: "corner", label: "Córner" },
+  card: { cls: "tarjeta", label: "Tarjeta" },
+};
 
-  const shape = (key, color, fillOpacity) => {
-    const points = metrics
-      .map((m, i) => at(i, R * Math.max(0.05, m[key])).map((v) => v.toFixed(1)).join(","))
-      .join(" ");
-    const dots = metrics
-      .map((m, i) => {
-        const [x, y] = at(i, R * Math.max(0.05, m[key]));
-        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.2" fill="${esc(color)}" />`;
-      })
-      .join("");
-    return `<polygon points="${points}" fill="${esc(color)}" fill-opacity="${fillOpacity}" stroke="${esc(
-      color
-    )}" stroke-width="1.6" stroke-linejoin="round" />${dots}`;
+function radarHTML(data) {
+  const local = data.local || {};
+  const visita = data.visitante || {};
+  const cuenta = data.cuenta || {};
+  const raw = state.game?.raw;
+  const colorOf = (side) =>
+    raw?.teams?.find((t) => t.homeAway === side)?.color || (side === "home" ? "#22d07a" : "#3a7aff");
+  const homeColor = colorOf("home");
+  const awayColor = colorOf("away");
+
+  // Sportradar manda las coordenadas sobre el campo entero: el local ataca
+  // hacia la derecha y el visitante hacia la izquierda, sin espejar nada.
+  const pos = (e) => ({
+    x: Math.min(99, Math.max(1, e.x)),
+    y: Math.min(99, Math.max(1, e.y)),
+  });
+
+  // Un aro blanco sobre un balón blanco no se ve: si el color del equipo es
+  // muy claro se usa el fondo oscuro para el borde.
+  const ring = (color) => {
+    const m = String(color || "").match(/^#([0-9a-f]{6})$/i);
+    if (!m) return color;
+    const n = parseInt(m[1], 16);
+    const lum = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+    return lum > 205 ? "#0a0e13" : color;
   };
 
-  const axes = metrics
-    .map((_, i) => {
-      const [x, y] = at(i, R);
-      return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(
-        1
-      )}" stroke="rgba(255,255,255,.10)" />`;
+  const eventos = (data.eventos || [])
+    .filter((e) => RADAR_TIPOS[e.tipo] && e.x != null && e.y != null)
+    .slice(-45)
+    .map((e) => {
+      const tipo = RADAR_TIPOS[e.tipo];
+      const p = pos(e);
+      const titulo = `${e.min != null ? `${e.min}' ` : ""}${tipo.label}${e.jugador ? ` · ${e.jugador}` : ""}`;
+      return `<span class="rp-dot ${tipo.cls}" style="left:${p.x.toFixed(1)}%;top:${p.y.toFixed(1)}%" title="${esc(
+        titulo
+      )}"></span>`;
     })
     .join("");
 
-  const labels = metrics
-    .map((m, i) => {
-      const [x, y] = at(i, R + 14);
-      const cos = Math.cos(angle(i));
-      const anchor = Math.abs(cos) < 0.25 ? "middle" : cos > 0 ? "start" : "end";
-      return `<text x="${x.toFixed(1)}" y="${(y + 3.4).toFixed(1)}" text-anchor="${anchor}" class="radar-label">${esc(
-        m.label
-      )}</text>`;
-    })
+  const balon = data.balon
+    ? (() => {
+        const p = pos(data.balon);
+        const color = data.balon.equipo === "home" ? homeColor : awayColor;
+        return `<span class="rp-ball" style="left:${p.x.toFixed(1)}%;top:${p.y.toFixed(
+          1
+        )}%;--ball:${esc(ring(color))}" title="Balón"></span>`;
+      })()
+    : "";
+
+  const chips = [
+    ["Tiros", cuenta.tiros],
+    ["A puerta", cuenta.aPuerta],
+    ["Córners", cuenta.corners],
+    ["Tarjetas", cuenta.tarjetas],
+  ]
+    .filter(([, par]) => Array.isArray(par))
+    .map(
+      ([label, par]) =>
+        `<span class="rp-chip"><b>${esc(label)}</b> ${esc(txt(par[0]))} · ${esc(txt(par[1]))}</span>`
+    )
     .join("");
 
+  const marcador =
+    local.marcador != null && visita.marcador != null ? `${local.marcador} - ${visita.marcador}` : "–";
+  const reloj = data.minuto != null ? `${data.minuto}'` : data.estado || "";
+
+  const line = 'stroke="rgba(255,255,255,.18)" stroke-width="0.4" fill="none"';
   return `
-    <div class="radar">
-      <svg class="radar-svg" viewBox="0 0 340 288" role="img" aria-label="Radar comparativo de los dos equipos">
-        ${[0.25, 0.5, 0.75, 1]
-          .map((k) => `<polygon points="${ring(k)}" fill="none" stroke="rgba(255,255,255,.10)" />`)
-          .join("")}
-        ${axes}
-        ${shape("awayRatio", awayColor, 0.14)}
-        ${shape("homeRatio", homeColor, 0.2)}
-        ${labels}
-      </svg>
-      <div class="radar-teams">
-        <span></span>
-        <span>${esc(homeName || "Local")}</span>
-        <span>${esc(awayName || "Visitante")}</span>
+    <section class="dcard radar-live">
+      <h3>Radar en vivo ${data.enVivo ? '<span class="rp-live"><i></i>en directo</span>' : ""}</h3>
+      <div class="rp-head">
+        <span class="rp-team"><i style="background:${esc(homeColor)}"></i>${esc(local.nombre || "Local")}</span>
+        <b class="rp-score">${esc(marcador)}</b>
+        <span class="rp-team a">${esc(visita.nombre || "Visitante")}<i style="background:${esc(
+    awayColor
+  )}"></i></span>
       </div>
-      <ul class="radar-legend">
-        ${metrics
-          .map(
-            (m) => `<li><span class="rd-name">${esc(m.label)}</span>
-              <b style="color:${esc(homeColor)}">${esc(m.homeText)}</b>
-              <b style="color:${esc(awayColor)}">${esc(m.awayText)}</b></li>`
-          )
-          .join("")}
-      </ul>
-    </div>`;
+      <div class="rp-clock">${esc(reloj)}</div>
+      <div class="rp-pitch">
+        <svg viewBox="0 0 100 64" preserveAspectRatio="none" role="img" aria-label="Radar del partido">
+          <line x1="50" y1="0" x2="50" y2="64" ${line} />
+          <circle cx="50" cy="32" r="9" ${line} />
+          <rect x="0" y="20" width="16" height="24" ${line} />
+          <rect x="0" y="27" width="5.5" height="10" ${line} />
+          <rect x="84" y="20" width="16" height="24" ${line} />
+          <rect x="94.5" y="27" width="5.5" height="10" ${line} />
+        </svg>
+        ${eventos}
+        ${balon}
+      </div>
+      <div class="rp-legend">
+        <span><i class="rp-key goal"></i>Gol</span>
+        <span><i class="rp-key shot"></i>Tiro</span>
+        <span><i class="rp-key corner"></i>Córner</span>
+        <span><i class="rp-key tarjeta"></i>Tarjeta</span>
+        <span><i class="rp-key ball"></i>Balón</span>
+      </div>
+      <div class="rp-chips">${chips}</div>
+      <p class="muted small radar-note">Datos de Sportradar (Live Match Tracker), los mismos que usa FotMob. Se actualiza cada 15 s.</p>
+    </section>`;
 }
 
-async function panelRadar(id, league) {
-  const data = await loadStats(id, league);
-  const { home, away } = sidesOf(state.game?.raw);
-  const colorOf = (side) =>
-    state.game?.raw?.teams?.find((t) => t.homeAway === side)?.color ||
-    (side === "home" ? "#22d07a" : "#3a7aff");
-
-  const radar = radarSVG(radarMetrics(data?.grupos), colorOf("home"), colorOf("away"), home?.name, away?.name);
-  const momentum = momentumSVG(data?.momento);
-  const shotMap = shotMapHTML(data?.tiros, home?.name, away?.name);
-
-  if (!radar && !momentum && !shotMap) {
+async function panelRadar(id) {
+  const detail = await loadDetail(id);
+  const sr = srMatchId(detail);
+  if (!sr) {
     return emptyHTML(
-      "Sin radar disponible",
-      data?.motivo || "FotMob todavía no publicó estadísticas de este partido."
+      "Sin radar en vivo",
+      "FotMob no publica el radar de este partido: solo lo tiene en los que sigue en directo con datos de Sportradar."
     );
   }
 
-  const faltan = [];
-  if (!shotMap) faltan.push("el mapa de tiros");
-  if (!momentum) faltan.push("el gráfico de dominio");
+  const data = await loadRadar(sr);
+  if (!data?.ok) {
+    return emptyHTML("Sin radar en vivo", data?.motivo || "El radar no devolvió datos de este partido.");
+  }
 
-  return (
-    (radar
-      ? `<section class="dcard"><h3>Radar del partido</h3>${radar}
-          <p class="muted small radar-note">Cada eje se escala al mejor de los dos equipos.</p></section>`
-      : "") +
-    momentum +
-    shotMap +
-    (faltan.length
-      ? `<p class="muted small radar-note">FotMob no publicó ${faltan.join(" ni ")} de este partido.</p>`
-      : "")
-  );
+  stopRadar();
+  radarTimer = setInterval(async () => {
+    const host = document.querySelector("#panel .radar-live");
+    // Se para al cambiar de pestaña o al salir del partido.
+    if (state.tab !== "radar" || state.view !== "detail" || !host) {
+      stopRadar();
+      return;
+    }
+    const nuevo = await loadRadar(sr);
+    if (host.isConnected && nuevo?.ok) host.outerHTML = radarHTML(nuevo);
+  }, RADAR_MS);
+
+  return radarHTML(data);
 }
 
 async function panelEstadisticas(id, league) {
