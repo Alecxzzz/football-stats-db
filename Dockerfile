@@ -8,4 +8,4 @@ WORKDIR /app
 COPY --from=build /app/publish .
 ENV ASPNETCORE_ENVIRONMENT=Production
 EXPOSE 8080
-ENTRYPOINT ["sh", "-c", "dotnet FootballStats.Api.dll"]
+ENTRYPOINT ["dotnet", "FootballStats.Api.dll"]

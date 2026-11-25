@@ -31,6 +31,12 @@ public class FuentesController : ControllerBase
 
     private static readonly HttpClient Http = CreateClient();
 
+    // FotMob añade esto a todos los requests del frontend. Sin él devuelve
+    // {"action":{"notFound":true}} o 404. Solo se añade cuando falta.
+    private static readonly string FotmobOrigin = "Origin",
+        FotmobReferer = "Referer",
+        FotmobAuthPattern = "Cookie";
+
     private static readonly ConcurrentDictionary<string, Entry> Cache = new();
 
     private readonly AlmacenFutbol _almacen;
@@ -102,6 +108,13 @@ public class FuentesController : ControllerBase
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.TryAddWithoutValidation("Referer", referer);
+
+        // FotMob exige esta cabecera; obliga Referer/Origin a su dominio.
+        if (url.StartsWith("https://www.fotmob.com/api/data/"))
+        {
+            request.Headers.TryAddWithoutValidation(FotmobOrigin, "https://www.fotmob.com/");
+            request.Headers.TryAddWithoutValidation(FotmobReferer, "https://www.fotmob.com/");
+        }
 
         HttpResponseMessage response;
         try
