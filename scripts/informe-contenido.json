@@ -1,0 +1,540 @@
+{
+  "title": "Almacenamiento, actualización y filtrado de datos",
+  "subtitle": "Informe técnico del visor de estadísticas de fútbol — Football Stats DB",
+  "meta": [
+    "Proyecto: Football Stats DB (visor de estadísticas tipo SofaScore, solo fútbol)",
+    "Base de datos: MongoDB 9.0.4 — base threesixtybets_db",
+    "Aplicación: ASP.NET Core (.NET 10) con frontend estático servido desde wwwroot",
+    "Fuente de datos: APIs no oficiales de FotMob (principal) y ESPN (alternativa)",
+    "Dirección local del visor: http://localhost:5080",
+    "Fecha del informe: 25 de noviembre de 2026"
+  ],
+  "blocks": [
+    { "t": "h1", "text": "1. Resumen ejecutivo" },
+    { "t": "p", "text": "El visor no guarda datos introducidos por un usuario: archiva en MongoDB lo que ya trae de la API de FotMob cada vez que alguien navega por los partidos. Ese archivo cumple dos funciones: sirve de respaldo cuando la fuente falla o deja de publicar un dato (por ejemplo, la alineación de un partido antiguo) y da material real para consultar con mongosh en la exposición." },
+    { "t": "p", "text": "La base threesixtybets_db contiene hoy 12 colecciones, que se pueden agrupar en tres tipos según su origen:" },
+    { "t": "bullets", "items": [
+      "Colecciones de fuente: PartidosFm, LigasFm, Alineaciones, Estadisticas, Eventos y Jugadores. Se escriben directamente desde la respuesta de FotMob.",
+      "Colección de catálogo: LigasSoportadas, con las 558 competiciones que ofrece el visor (popular, internacionales y por país).",
+      "Colecciones derivadas: TopLigas, Paises, Equipos y ResumenDiario. No las envía ninguna API: se calculan desde PartidosFm y LigasSoportadas.",
+      "Colección de log: ConsultasApi, que registra cada petición al puente y se borra sola a los 7 días mediante un índice TTL."
+    ]},
+    { "t": "p", "text": "Toda escritura es idempotente: se hace con UpdateOne + IsUpsert sobre una clave natural (match_id, liga_id, match_id + jugador_id), de modo que pedir dos veces la misma jornada actualiza los documentos en lugar de duplicarlos. El navegador nunca habla con MongoDB ni con FotMob: solo con localhost:5080, y es el servidor .NET el que escribe en la base." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "2. Por qué este proyecto se usa para MongoDB" },
+    { "t": "p", "text": "La pregunta obligada en un examen es por qué MongoDB y no una base relacional. Aquí la respuesta no es de gusto: el proyecto no se construyó para demostrar MongoDB, se construyó como visor de fútbol y MongoDB resolvió las necesidades que fueron apareciendo. La tabla siguiente une cada necesidad real del visor con la pieza de MongoDB que la cubre y con el archivo donde se ve." },
+    { "t": "table", "headers": ["Necesidad del visor", "Cómo la cubre MongoDB", "Dónde se ve"], "rows": [
+      ["Archivar lo que devuelve la API sin definir antes un esquema", "documentos BSON: cada partido, alineación o estadística se guarda tal como llega", "Alineaciones.json, Estadisticas.json, Eventos.json"],
+      ["Actualizar un partido en directo sin duplicarlo", "índice único sobre match_id + UpdateOne con IsUpsert", "AlmacenFutbol.AsegurarIndicesAsync"],
+      ["Sacar cifras por liga, país o día sin recorrer todo", "pipeline de agregación sobre PartidosFm", "AlmacenFutbol.RecalcularDerivadosAsync"],
+      ["Que la web siga mostrando datos cuando FotMob falla", "lectura alternativa de los partidos ya guardados", "app.js, load() + /api/datos/partidos"],
+      ["Filtrar 558 competiciones por país y por texto", "índice pais_nombre y regex sobre un campo sin esquema rígido", "GET /api/datos/ligas-soportadas"],
+      ["No acumular el log de peticiones para siempre", "índice TTL de 7 días sobre el campo fecha", "ConsultasApi.ttl_7_dias"]
+    ]},
+    { "t": "p", "text": "A eso se suman dos ventajas para la defensa. La primera es que los datos son reales: los 286 partidos, 558 competiciones, 95 países y 572 equipos salen de FotMob, no de un generador de datos de prueba. La segunda es que la misma base se puede mirar desde tres sitios distintos —la web en localhost:5080, los endpoints /api/datos y mongosh—, así que no hay una base de mentira para la exposición separada de la que usa la aplicación." },
+    { "t": "p", "text": "Tampoco se eligió por volumen: 1 711 documentos no justifican una base NoSQL por escala, sino por la forma del dato y por la velocidad de desarrollo." },
+    { "t": "bullets", "items": [
+      "El payload de una alineación o de las estadísticas cambia de forma según lo que publique FotMob; en tablas habría que añadir columnas cada vez que la fuente cambia.",
+      "Un partido se reescribe varias veces el mismo día (pre, in, post): el upsert por clave natural es una línea, no un MERGE con control de versiones.",
+      "Los derivados son lecturas agregadas, no entidades que haya que normalizar; guardarlos como documentos evita cinco JOIN solo para pintar un resumen.",
+      "El log de peticiones es material efímero: un TTL lo resuelve sin ningún proceso de limpieza en el código."
+    ]},
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "3. Por qué doce consultas y no muchas más" },
+    { "t": "p", "text": "La regla que se siguió es simple: una consulta representativa por colección, ni una más. La base tiene doce colecciones, así que el listado tiene doce líneas. No es una limitación, es un criterio: si dos consultas solo se diferencian en un valor (otro día, otro país, otro partido), la segunda no enseña nada nuevo y solo alarga la explicación." },
+    { "t": "table", "headers": ["Colección", "Consulta representativa", "Qué demuestra"], "rows": [
+      ["PartidosFm", "db.PartidosFm.find({ dia: '20261125', estado: 'in' }).count()", "filtro combinado por igualdad sobre campo indexado + count"],
+      ["LigasFm", "db.LigasFm.find({ pais: 'INT' }).sort({ nombre: 1 })", "filtro + orden sobre el resultado"],
+      ["LigasSoportadas", "db.LigasSoportadas.find({ pais: 'ESP', nombre: /liga/i }).count()", "igualdad + regex en la misma consulta"],
+      ["Alineaciones", "db.Alineaciones.findOne({ match_id: 5868132 })", "lectura por clave natural única"],
+      ["Estadisticas", "db.Estadisticas.findOne({ match_id: 5868132 }, { json: 0 })", "exclusión de un campo pesado (proyección)"],
+      ["Eventos", "db.Eventos.findOne({ match_id: 5868132 }, { goles: 1, total: 1, _id: 0 })", "proyección de solo los campos que se muestran"],
+      ["Jugadores", "db.Jugadores.find({ match_id: 5868132, nota: { $gte: 7 } }).sort({ nota: -1 })", "rango numérico + orden descendente"],
+      ["TopLigas", "db.TopLigas.find().sort({ prioridad: 1 })", "orden fijo por prioridad indexada"],
+      ["Paises", "db.Paises.find({}, { _id: 0, pais: 1, ligas: 1 }).sort({ ligas: -1 }).limit(3)", "orden por cifra agregada + limit"],
+      ["Equipos", "db.Equipos.find({ nombre: /real/i }).count()", "regex sobre el nombre con índice de apoyo"],
+      ["ResumenDiario", "db.ResumenDiario.aggregate([{ $group: { _id: null, partidos: { $sum: '$partidos' }, goles: { $sum: '$goles' } } }])", "agregación $group con acumuladores"],
+      ["ConsultasApi", "db.ConsultasApi.aggregate([{ $group: { _id: '$ruta', n: { $sum: 1 } } }, { $sort: { n: -1 } }])", "agrupación sobre el log y reparto por ruta"]
+    ]},
+    { "t": "p", "text": "Con esas doce se cubren igualdad, rango, regex, proyección, orden, límite, agregación, claves únicas, índices y TTL, que es todo lo que se quiere demostrar. Lo que se dejó fuera, a propósito:" },
+    { "t": "bullets", "items": [
+      "Variantes de la misma consulta: diez días distintos o cinco países distintos repiten el mismo operador y no aportan nada a la explicación.",
+      "Consultas que no responden a ninguna pantalla ni cálculo del proyecto: si la app no la usa, no entra en el guion.",
+      "El $lookup entre partidos y equipos se enseña una vez en el documento de consultas, no doce.",
+      "Las 8 a 12 variantes por colección existen en Consultas-MongoDB-FootballStats.txt para quien quiera practicar; la exposición usa una por colección."
+    ]},
+    { "t": "p", "text": "El resultado es un guion de trece comandos contando el conteo general, que se ejecuta en unos cinco minutos y no obliga a repetir explicaciones. Si en algún momento hiciera falta una consulta más, se añadiría a la colección que corresponda, nunca como copia de otra." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "4. Arquitectura del almacenamiento" },
+    { "t": "p", "text": "El recorrido completo de un dato, desde que el usuario abre la portada hasta que queda en disco, es el siguiente:" },
+    { "t": "code", "lines": [
+      "navegador  ->  GET /api/fm/matches?date=20261125",
+      "           ->  FuentesController.Fotmob()",
+      "                 cabeceras User-Agent + Referer (FotMob las exige)",
+      "                 cache en memoria de 60 s (TtlSeconds)",
+      "                 GET https://www.fotmob.com/api/data/matches?date=20261125",
+      "           ->  si estado 200 y NO vino de cache:",
+      "                 AlmacenFutbol.GuardarAsync(ruta, query, body)",
+      "           ->  switch por ruta:",
+      "                 matches       -> PartidosFm + LigasFm",
+      "                 matchDetails  -> Alineaciones + Estadisticas + Eventos + Jugadores",
+      "                 leagues       -> LigasFm",
+      "                 allLeagues    -> LigasSoportadas",
+      "           ->  RecalcularDerivadosAsync()  (TopLigas, Paises, Equipos, ResumenDiario)",
+      "navegador  <-  el JSON original de FotMob, sin transformar"
+    ]},
+    { "t": "p", "text": "Este diseño tiene una consecuencia importante para la defensa del proyecto: el mismo cuerpo que se devuelve al navegador es el que se parsea para guardar. No hay un proceso de importación aparte ni un script de carga; la base se llena con el uso normal del visor." },
+    { "t": "p", "text": "Las piezas implicadas son cuatro: FuentesController (puente HTTP), AlmacenFutbol (escritura, índices y derivados), DatosController (lectura y filtros por HTTP) y FootballStatsContext (acceso a las colecciones). Program.cs crea los índices al arrancar, antes de aceptar peticiones." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "5. Cómo guarda la información" },
+    { "t": "h2", "text": "5.1. Reglas de la capa de escritura" },
+    { "t": "bullets", "items": [
+      "Solo se archivan cuatro rutas: matches, matchDetails, leagues y allLeagues. Cualquier otra respuesta se devuelve pero no se guarda.",
+      "Solo se archiva si la respuesta es 200 y no procede de la caché de 60 segundos, para no escribir lo mismo dos veces seguidas.",
+      "Cada guardado usa UpdateOne con IsUpsert = true y filtro por clave natural; nunca Insert sin más (salvo en el log de consultas).",
+      "Los campos se actualizan con Set condicional: si un dato no viene en la respuesta, no se borra el que ya había.",
+      "Las escrituras masivas usan BulkWriteAsync con IsOrdered = false: si un documento falla, el resto se escribe igual.",
+      "El payload original se conserva como texto en el campo json (lineup, stats, eventos y el nodo de cada jugador).",
+      "Todo va envuelto en try/catch con LogWarning: si MongoDB no responde, el visor sigue funcionando sin guardar."
+    ]},
+    { "t": "h2", "text": "5.2. Qué se guarda según la ruta" },
+    { "t": "table", "headers": ["Ruta pedida", "Colecciones que escribe", "Clave del upsert"], "rows": [
+      ["matches?date=YYYYMMDD", "PartidosFm + LigasFm", "match_id / liga_id"],
+      ["matchDetails?matchId=...", "Alineaciones, Estadisticas, Eventos, Jugadores", "match_id / match_id + jugador_id"],
+      ["leagues?id=...", "LigasFm (nombre y temporada)", "liga_id"],
+      ["allLeagues", "LigasSoportadas (catálogo completo)", "liga_id"],
+      ["cualquier petición", "ConsultasApi (registro, TTL 7 días)", "_id (inserción)"]
+    ]},
+    { "t": "p", "text": "Ejemplo del primer caso: de la respuesta de matches se recorre leagues y, por cada liga, su lista de matches. De cada partido se extraen solo los campos que luego hacen falta para filtrar y ordenar (match_id, dia, liga_id, local, visitante, goles, estado, fecha) y se descarta el resto del payload, que no se necesita." },
+
+    { "t": "h2", "text": "5.3. Índices que sostienen las consultas" },
+    { "t": "p", "text": "Se crean una sola vez al arrancar, en AlmacenFutbol.AsegurarIndicesAsync(), invocado desde Program.cs antes de app.RunAsync(). Si MongoDB está caído, el arranque no se rompe: solo se registra un aviso." },
+    { "t": "table", "headers": ["Colección", "Índice", "Para qué sirve"], "rows": [
+      ["PartidosFm", "match_id_unico (único)", "no duplicar partidos y localizar uno por id"],
+      ["PartidosFm", "dia_fecha", "listar una jornada y ordenarla por hora"],
+      ["LigasFm", "liga_id_unico", "una ficha por competición"],
+      ["Alineaciones, Estadisticas, Eventos", "match_id_unico", "una sola versión por partido"],
+      ["Jugadores", "match_jugador_unico", "una fila por jugador y partido"],
+      ["ConsultasApi", "ttl_7_dias", "borrado automático del log a los 7 días"],
+      ["LigasSoportadas", "liga_id_unico y pais_nombre", "catálogo sin duplicados y filtro por país"],
+      ["TopLigas", "liga_id_unico y prioridad_unica", "orden fijo de las cinco oficiales"],
+      ["Paises", "pais_unico", "una ficha por país"],
+      ["Equipos", "equipo_id_unico y nombre_equipo", "sin duplicados y búsqueda por nombre"],
+      ["ResumenDiario", "dia_unico", "una fila por día"]
+    ]},
+
+    { "t": "h2", "text": "5.4. Colecciones derivadas" },
+    { "t": "p", "text": "Cuatro colecciones no se guardan desde la fuente: se recalculan leyendo lo que ya hay. Esto es lo que permite enseñar agregaciones reales sin datos inventados." },
+    { "t": "table", "headers": ["Colección", "Se calcula desde", "Qué contiene"], "rows": [
+      ["TopLigas", "lista fija + conteo en PartidosFm", "liga_id, nombre, país, prioridad 1 a 5 y partidos_guardados"],
+      ["Equipos", "PartidosFm", "equipo_id, nombre, país, ligas, partidos, goles y última vez"],
+      ["Paises", "LigasSoportadas + PartidosFm + Equipos", "país, número de ligas, partidos y equipos"],
+      ["ResumenDiario", "PartidosFm", "día, partidos, goles, en vivo y ligas distintas"]
+    ]},
+    { "t": "bullets", "items": [
+      "Se ejecuta en cuatro momentos: al crear los índices (arranque), tras guardar una jornada, tras guardar el catálogo y al llamar manualmente a POST /api/datos/recalcular.",
+      "Todas sus escrituras son upsert, así que recalcular dos veces no cambia el número de documentos, solo los valores.",
+      "No borra documentos antiguos: si un equipo deja de aparecer en PartidosFm, sigue en Equipos con sus cifras acumuladas. Es histórico, no un error de lectura."
+    ]},
+
+    { "t": "h2", "text": "5.5. Respaldo de lectura" },
+    { "t": "p", "text": "El respaldo es la razón práctica del almacén. En app.js, la función load() intenta primero fetchDay() contra FotMob; si falla o devuelve un día vacío, llama a dbGet('/partidos?fecha=...') y reconstruye la portada con los partidos guardados, marcando state.fromDb = true. Lo mismo ocurre con el detalle de un partido: si la API no responde, se sirve /api/datos/detalle/{matchId}, que une las cinco colecciones del partido en la forma que espera el frontend." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "6. Cómo modifica la información" },
+    { "t": "h2", "text": "6.1. No existe edición manual desde la interfaz" },
+    { "t": "p", "text": "El visor no tiene formularios de alta, edición ni borrado. En /api/datos no hay ningún PUT, PATCH ni DELETE: solo GET y un POST de recálculo. La modificación de datos no la decide el usuario, la provoca el paso del tiempo en la fuente." },
+
+    { "t": "h2", "text": "6.2. Volver a pedir lo mismo es actualizar" },
+    { "t": "p", "text": "Cada vez que se abre una jornada, el mismo match_id se reescribe con los valores nuevos. Es el mecanismo normal de actualización de un partido en directo:" },
+    { "t": "code", "lines": [
+      "// primer guardado: el partido aun no ha empezado",
+      "{ match_id: 6580839, estado: 'pre', jugando: false, terminado: false,",
+      "  goles_local: 0, goles_visitante: 0 }",
+      "",
+      "// segundo guardado, dos horas despues (mismo match_id, mismo _id)",
+      "{ match_id: 6580839, estado: 'post', jugando: false, terminado: true,",
+      "  goles_local: 2, goles_visitante: 1 }"
+    ]},
+    { "t": "p", "text": "El identificador ObjectId no cambia nunca: la identidad del documento la da la clave natural y el índice único impide que aparezca un duplicado. Al abrir un partido ocurre lo mismo con Alineaciones, Estadisticas, Eventos y Jugadores: se actualizan las notas, los eventos y las cifras, no se añaden filas." },
+
+    { "t": "h2", "text": "6.3. Recálculo de las colecciones derivadas" },
+    { "t": "p", "text": "Los derivados se pueden regenerar a demanda, sin reiniciar la aplicación y sin tocar la fuente:" },
+    { "t": "code", "lines": [
+      "curl -s -X POST 'http://localhost:5080/api/datos/recalcular'",
+      "",
+      "// respuesta real de esta base",
+      "{ \"status\": \"ok\", \"topLigas\": 5, \"equipos\": 572, \"paises\": 95, \"dias\": 2 }"
+    ]},
+
+    { "t": "h2", "text": "6.4. El único borrado: TTL del log" },
+    { "t": "p", "text": "ConsultasApi crece con cada petición y no se limpia a mano. El índice ttl_7_dias tiene expireAfterSeconds = 604800, de modo que MongoDB elimina los documentos cuando su campo fecha supera los siete días. Es el único borrado del sistema." },
+    { "t": "code", "lines": [
+      "db.ConsultasApi.getIndexes().filter(i => i.expireAfterSeconds !== undefined)",
+      "// { name: 'ttl_7_dias', key: { fecha: 1 }, expireAfterSeconds: 604800 }"
+    ]},
+
+    { "t": "h2", "text": "6.5. Modificación manual para la demostración" },
+    { "t": "p", "text": "Si en la exposición se quiere enseñar una escritura explícita, un updateOne sobre PartidosFm produce un cambio visible al recargar la portada:" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.updateOne(",
+      "  { match_id: 6580839 },",
+      "  { $set: { estado: 'post', terminado: true, jugando: false,",
+      "            goles_local: 2, goles_visitante: 1, actualizado: new Date() } }",
+      ")",
+      "// { acknowledged: true, matchedCount: 1, modifiedCount: 1 }"
+    ]},
+    { "t": "p", "text": "Advertencia para no confundir a quien pregunte: si el campo modificado también lo envía FotMob, la siguiente petición de esa jornada lo sobrescribe. La modificación manual sirve para demostrar el update; los cambios permanentes solo se consiguen cambiando la fuente o un campo que la fuente no envíe." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "7. Cómo filtrar" },
+    { "t": "p", "text": "Hay tres niveles de filtrado y conviene distinguirlos al explicarlos: los filtros de la interfaz (en el navegador), los parámetros de la API (en el servidor, contra MongoDB) y las consultas directas en mongosh." },
+
+    { "t": "h2", "text": "7.1. En la interfaz" },
+    { "t": "bullets", "items": [
+      "Portada: el día se elige con state.offset (hoy, ayer, mañana) y se traduce a fecha=YYYYMMDD; el selector de competición filtra state.games por league_code.",
+      "El contador de en vivo no es un filtro aparte: se calcula con state.games.filter(g => g.state === 'in').",
+      "Catálogo #/ligas: se cargan las 558 competiciones una sola vez (/ligas-soportadas?limite=1000) y se filtran en el navegador con ligasFiltradas(), que combina modo (todas o top5), país y texto libre sobre el nombre o el país.",
+      "Al pulsar una liga del catálogo se vuelve a la portada ya filtrada por esa competición."
+    ]},
+
+    { "t": "h2", "text": "7.2. Filtros por HTTP" },
+    { "t": "table", "headers": ["Endpoint", "Parámetros", "Qué devuelve"], "rows": [
+      ["GET /api/datos/partidos", "fecha=YYYYMMDD o desde/hasta ISO, limite 1-1000", "partidos del día o del rango, ordenados por fecha"],
+      ["GET /api/datos/ligas-soportadas", "pais, tipo, q, limite", "catálogo filtrado con el total real"],
+      ["GET /api/datos/equipos", "pais, liga, limite", "equipos con partidos, goles y ligas"],
+      ["GET /api/datos/paises", "limite", "países ordenados por número de ligas"],
+      ["GET /api/datos/resumen-diario", "limite", "una fila por día"],
+      ["GET /api/datos/top-ligas", "ninguno", "las cinco oficiales por prioridad"],
+      ["GET /api/datos/detalle/{matchId}", "ninguno", "une las cinco colecciones del partido"],
+      ["GET /api/datos/consultas", "limite", "registro de peticiones al puente"],
+      ["POST /api/datos/recalcular", "ninguno", "regenera las cuatro colecciones derivadas"]
+    ]},
+    { "t": "p", "text": "Resultados reales de esta base, comprobados con curl:" },
+    { "t": "code", "lines": [
+      "curl -s 'http://localhost:5080/api/datos/ligas-soportadas?pais=ESP'",
+      "// total: 9   (LaLiga 87, LaLiga2 140, Copa del Rey 138, Liga F 9907...)",
+      "",
+      "curl -s 'http://localhost:5080/api/datos/ligas-soportadas?q=premier'",
+      "// total: 32  (todas las competiciones llamadas Premier League)",
+      "",
+      "curl -s 'http://localhost:5080/api/datos/partidos?fecha=20261125'",
+      "// total: 133",
+      "",
+      "curl -s 'http://localhost:5080/api/datos/equipos?pais=ESP&limite=3'",
+      "// total: 3   (CF Intercity, CF Talavera de la Reina, Conquense)"
+    ]},
+
+    { "t": "h2", "text": "7.3. Filtros en mongosh" },
+    { "t": "p", "text": "Estas son las consultas que se usarán en la exposición, con el campo y el índice que aprovechan:" },
+    { "t": "code", "lines": [
+      "use threesixtybets_db",
+      "",
+      "// 1) partidos de un dia",
+      "db.PartidosFm.find({ dia: '20261125' }).count()          // 133",
+      "",
+      "// 2) solo los que estan en juego",
+      "db.PartidosFm.find({ dia: '20261125', estado: 'in' }).count()",
+      "",
+      "// 3) una liga concreta, ordenada por hora",
+      "db.PartidosFm.find({ liga_id: 87 }).sort({ fecha: 1 }).limit(5)",
+      "",
+      "// 4) rango real de fechas (campo Date, indice dia_fecha)",
+      "db.PartidosFm.find({ fecha: { $gte: ISODate('2026-11-25'), $lt: ISODate('2026-11-26') } }).count()",
+      "",
+      "// 5) catalogo: pais + texto libre",
+      "db.LigasSoportadas.find({ pais: 'ESP', nombre: /liga/i }).count()",
+      "",
+      "// 6) jugadores con nota alta en un partido",
+      "db.Jugadores.find({ match_id: 5868132, nota: { $gte: 7 } }).sort({ nota: -1 })",
+      "",
+      "// 7) proyeccion: solo los campos que se muestran",
+      "db.PartidosFm.find({ dia: '20261125' },",
+      "  { _id: 0, liga: 1, local: 1, visitante: 1, goles_local: 1, goles_visitante: 1 }).limit(3)"
+    ]},
+
+    { "t": "h2", "text": "7.4. Qué campo usar y qué se aprovecha" },
+    { "t": "bullets", "items": [
+      "dia es texto con formato yyyymmdd (lo que envía el frontend); fecha es Date en UTC (para rangos y orden). Mezclarlos es el error más habitual.",
+      "pais y liga_id existe en PartidosFm, Equipos, Paises y LigasSoportadas, y están indexados.",
+      "Los filtros de igualdad (pais, tipo, liga_id, dia) usan índice; una regex libre no lo usa, pero sobre 558 documentos el tiempo es imperceptible.",
+      "El campo json es texto, no un subdocumento: se puede buscar con expresiones regulares, pero no con notación de puntos (content.lineup.homeTeam)."
+    ]},
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "8. Comandos para la exposición" },
+    { "t": "p", "text": "Guion ordenado, pensado para ejecutarse en unos ocho minutos. Cada paso indica el comando y el resultado esperado; los valores son los de esta base el 25 de noviembre de 2026 y cambiarán algo con el uso normal del visor." },
+
+    { "t": "h2", "text": "8.1. Preparación" },
+    { "t": "code", "lines": [
+      "# MongoDB como servicio de Windows (debe estar Running)",
+      "Get-Service MongoDB",
+      "",
+      "# consola de MongoDB",
+      "mongosh 'mongodb://localhost:27017/threesixtybets_db'",
+      "",
+      "# aplicacion web (en otra terminal)",
+      "cd src/Api",
+      "dotnet bin/Debug/net10.0/FootballStats.Api.dll",
+      "# abrir http://localhost:5080"
+    ]},
+
+    { "t": "h2", "text": "8.2. Paso 1: conectarse y ver las colecciones" },
+    { "t": "code", "lines": [
+      "use threesixtybets_db",
+      "show collections"
+    ]},
+    { "t": "p", "text": "Resultado esperado: 12 colecciones. Alineaciones, ConsultasApi, Equipos, Estadisticas, Eventos, Jugadores, LigasFm, LigasSoportadas, Paises, PartidosFm, ResumenDiario y TopLigas." },
+
+    { "t": "h2", "text": "8.3. Paso 2: contar documentos" },
+    { "t": "code", "lines": [
+      "db.getCollectionNames().sort().forEach(c => print(c, db.getCollection(c).countDocuments()))"
+    ]},
+    { "t": "p", "text": "Resultado esperado: Alineaciones 5, ConsultasApi 44, Equipos 572, Estadisticas 2, Eventos 3, Jugadores 85, LigasFm 54, LigasSoportadas 558, Paises 95, PartidosFm 286, ResumenDiario 2, TopLigas 5." },
+
+    { "t": "h2", "text": "8.4. Paso 3: ver un documento completo" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.findOne({ dia: '20261125' })"
+    ]},
+    { "t": "p", "text": "Resultado esperado: un partido con match_id, dia, liga_id, liga, pais, local, visitante, goles_local, goles_visitante, fecha, estado (pre, in o post), jugando, terminado y actualizado. Sirve para explicar que la identidad es match_id y que el _id es un ObjectId interno." },
+
+    { "t": "h2", "text": "8.5. Paso 4: índices" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.getIndexes()",
+      "// _id_, match_id_unico (unique), dia_fecha",
+      "",
+      "db.LigasSoportadas.getIndexes()",
+      "// _id_, liga_id_unico, pais_nombre",
+      "",
+      "db.Equipos.getIndexes()",
+      "// _id_, equipo_id_unico, nombre_equipo"
+    ]},
+
+    { "t": "h2", "text": "8.6. Paso 5: el TTL del log" },
+    { "t": "code", "lines": [
+      "db.ConsultasApi.getIndexes().filter(i => i.expireAfterSeconds !== undefined)",
+      "// expireAfterSeconds: 604800  =  7 dias"
+    ]},
+    { "t": "p", "text": "Es el momento de aclarar que ningún proceso del proyecto borra datos: es MongoDB quien purga el log." },
+
+    { "t": "h2", "text": "8.7. Paso 6: filtros básicos" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.find({ dia: '20261125' }).count()            // 133",
+      "db.PartidosFm.find({ liga_id: 87 }).count()",
+      "db.PartidosFm.find({ dia: '20261125', estado: 'in' }).count()",
+      "db.PartidosFm.find({ dia: '20261125' }, { liga: 1, local: 1, goles_local: 1, _id: 0 }).limit(3)"
+    ]},
+
+    { "t": "h2", "text": "8.8. Paso 7: rango de fechas" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.find({ fecha: { $gte: ISODate('2026-11-25'), $lt: ISODate('2026-11-26') } }).count()",
+      "db.PartidosFm.find({ fecha: { $gte: ISODate('2026-11-24') } }).sort({ fecha: -1 }).limit(3)"
+    ]},
+
+    { "t": "h2", "text": "8.9. Paso 8: búsqueda por texto" },
+    { "t": "code", "lines": [
+      "db.LigasSoportadas.find({ nombre: /premier/i }).count()            // 32",
+      "db.LigasSoportadas.find({ pais: 'ESP' }).count()                  // 9",
+      "db.LigasSoportadas.find({ pais: 'ESP', nombre: /liga/i }).count()"
+    ]},
+
+    { "t": "h2", "text": "8.10. Paso 9: agregación por liga" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.aggregate([",
+      "  { $group: {",
+      "      _id: '$liga',",
+      "      partidos: { $sum: 1 },",
+      "      goles: { $sum: { $add: ['$goles_local', '$goles_visitante'] } }",
+      "  } },",
+      "  { $sort: { partidos: -1 } },",
+      "  { $limit: 5 }",
+      "])"
+    ]},
+    { "t": "p", "text": "Resultado esperado: las cinco competiciones con más partidos guardados y el total de goles de cada una. Es el mismo cálculo que hace ResumenDiario, pero por liga." },
+
+    { "t": "h2", "text": "8.11. Paso 10: agregado por país" },
+    { "t": "code", "lines": [
+      "db.Paises.find({}, { _id: 0, pais: 1, ligas: 1, partidos: 1 }).sort({ ligas: -1 }).limit(3)"
+    ]},
+    { "t": "p", "text": "Resultado esperado: INT con 127 ligas y 82 partidos, ENG con 23 y 69, BRA con 16 y 3. INT agrupa las competiciones internacionales (Champions, Europa League, selecciones)." },
+
+    { "t": "h2", "text": "8.12. Paso 11: comprobar que se usa el índice" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.find({ dia: '20261125' }).explain('executionStats').executionStats"
+    ]},
+    { "t": "p", "text": "Resultado esperado: totalDocsExamined próximo al número de resultados (133) y no a 286, lo que demuestra que la consulta pasa por dia_fecha en lugar de recorrer la colección completa." },
+
+    { "t": "h2", "text": "8.13. Paso 12: modificar un documento" },
+    { "t": "code", "lines": [
+      "db.PartidosFm.updateOne(",
+      "  { match_id: 6580839 },",
+      "  { $set: { estado: 'post', terminado: true, jugando: false,",
+      "            goles_local: 2, goles_visitante: 1, actualizado: new Date() } }",
+      ")",
+      "// { acknowledged: true, matchedCount: 1, modifiedCount: 1 }",
+      "",
+      "db.PartidosFm.findOne({ match_id: 6580839 }, { _id: 0, local: 1, visitante: 1, goles_local: 1, goles_visitante: 1, estado: 1 })"
+    ]},
+    { "t": "p", "text": "Después de recargar la portada, el marcador aparece cambiado: la lectura del visor y la base son la misma cosa." },
+
+    { "t": "h2", "text": "8.14. Paso 13: recalcular derivados desde la API" },
+    { "t": "code", "lines": [
+      "curl -s -X POST 'http://localhost:5080/api/datos/recalcular'",
+      "// { \"status\": \"ok\", \"topLigas\": 5, \"equipos\": 572, \"paises\": 95, \"dias\": 2 }"
+    ]},
+
+    { "t": "h2", "text": "8.15. Paso 14: probar los filtros de la API" },
+    { "t": "code", "lines": [
+      "curl -s 'http://localhost:5080/api/datos/resumen'",
+      "curl -s 'http://localhost:5080/api/datos/ligas-soportadas?pais=ESP'",
+      "curl -s 'http://localhost:5080/api/datos/ligas-soportadas?q=premier'",
+      "curl -s 'http://localhost:5080/api/datos/partidos?fecha=20261125'",
+      "curl -s 'http://localhost:5080/api/datos/equipos?pais=ESP&limite=3'",
+      "curl -s 'http://localhost:5080/api/datos/top-ligas'"
+    ]},
+    { "t": "p", "text": "Con esto quedan cubiertos los tres niveles: interfaz, API y base de datos. Si se quiere cerrar con una nota de diseño, basta señalar que el mismo dato se puede ver en la web, pedir por HTTP y consultar en mongosh, porque todo sale del mismo almacén." },
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "9. Documentación de las colecciones en MongoDB" },
+    { "t": "p", "text": "Esta sección es el diccionario de datos del proyecto: qué campos tiene cada colección, de qué tipo son y qué significan. Todos los documentos llevan además un _id de tipo ObjectId que genera MongoDB; ese _id no es la identidad de negocio, que siempre la marca la clave natural indicada en la introducción de cada tabla." },
+    { "t": "p", "text": "Dos convenciones comunes a todas las colecciones: los nombres de campo van en snake_case y en español, y cada colección de fuente o derivada termina con actualizado (o guardado en las tres de detalle), un Date en UTC con la última escritura del documento. Las fechas se guardan siempre en UTC y el visor las convierte a la hora local al mostrarlas." },
+
+    { "t": "h2", "text": "9.1. Colecciones de fuente" },
+    { "t": "p", "text": "Se escriben desde la respuesta de FotMob. Entre paréntesis, la clave natural del upsert." },
+    { "t": "table", "headers": ["Colección", "Campo", "Tipo", "Significado"], "rows": [
+      ["PartidosFm", "match_id", "int", "id del partido en FotMob (clave natural, índice único)"],
+      ["PartidosFm", "dia", "string", "día consultado en formato yyyymmdd; es el filtro de la portada"],
+      ["PartidosFm", "liga_id", "int", "id de la competición en FotMob"],
+      ["PartidosFm", "liga", "string", "nombre de la competición en el momento del guardado"],
+      ["PartidosFm", "pais", "string", "código de tres letras del país (INT si es internacional)"],
+      ["PartidosFm", "local", "string", "nombre del equipo local tal como lo publica la fuente"],
+      ["PartidosFm", "local_id", "int", "id del equipo local; enlaza con Equipos.equipo_id"],
+      ["PartidosFm", "visitante", "string", "nombre del equipo visitante"],
+      ["PartidosFm", "visitante_id", "int", "id del equipo visitante"],
+      ["PartidosFm", "goles_local", "int", "goles del local (0 mientras el partido no empieza)"],
+      ["PartidosFm", "goles_visitante", "int", "goles del visitante"],
+      ["PartidosFm", "fecha", "Date", "fecha y hora del partido en UTC; se usa para ordenar y para rangos"],
+      ["PartidosFm", "estado", "string", "pre (sin empezar), in (en juego) o post (terminado)"],
+      ["PartidosFm", "jugando", "bool", "copia booleana de estado = in, para filtrar sin comparar texto"],
+      ["PartidosFm", "terminado", "bool", "copia booleana de estado = post"],
+      ["LigasFm", "liga_id", "int", "id de la competición (clave natural, índice único)"],
+      ["LigasFm", "nombre", "string", "nombre de la competición"],
+      ["LigasFm", "codigo", "string", "id de la edición concreta (fase o grupo) que devuelve la API"],
+      ["LigasFm", "pais", "string", "código de país de la competición"],
+      ["LigasFm", "temporada", "string", "temporada en curso cuando la respuesta la incluye"],
+      ["Alineaciones", "match_id", "int", "partido al que pertenece el once (clave natural, índice único)"],
+      ["Alineaciones", "local", "string", "nombre del equipo local"],
+      ["Alineaciones", "visitante", "string", "nombre del equipo visitante"],
+      ["Alineaciones", "formacion_local", "string", "dibujo táctico del local, por ejemplo 4-2-3-1"],
+      ["Alineaciones", "formacion_visita", "string", "dibujo táctico del visitante"],
+      ["Alineaciones", "titulares", "int", "número de jugadores titulares que trajo la respuesta"],
+      ["Alineaciones", "suplentes", "int", "número de suplentes"],
+      ["Alineaciones", "json", "string", "nodo lineup completo de FotMob, guardado como texto"],
+      ["Estadisticas", "match_id", "int", "partido de las estadísticas (clave natural, índice único)"],
+      ["Estadisticas", "liga", "string", "competición del partido, para poder listar sin cruzar"],
+      ["Estadisticas", "json", "string", "bloque content.stats de FotMob como texto"],
+      ["Eventos", "match_id", "int", "partido de la cronología (clave natural, índice único)"],
+      ["Eventos", "total", "int", "número de eventos que trajo la respuesta"],
+      ["Eventos", "goles", "int", "goles detectados dentro de esos eventos"],
+      ["Eventos", "json", "string", "lista de eventos (goles, tarjetas, cambios) como texto"],
+      ["Jugadores", "match_id", "int", "partido (junto con jugador_id forma la clave natural)"],
+      ["Jugadores", "jugador_id", "int", "id del jugador en FotMob"],
+      ["Jugadores", "nombre", "string", "nombre del jugador"],
+      ["Jugadores", "equipo", "string", "equipo con el que jugó ese partido"],
+      ["Jugadores", "dorsal", "int", "dorsal en ese partido; puede faltar"],
+      ["Jugadores", "nota", "double", "calificación de FotMob; queda en null si la fuente no la publica"],
+      ["Jugadores", "json", "string", "nodo de estadísticas individuales como texto"]
+    ]},
+
+    { "t": "h2", "text": "9.2. Catálogo y colecciones derivadas" },
+    { "t": "p", "text": "LigasSoportadas se importa del catálogo de FotMob; las otras cuatro se recalculan desde los datos guardados, así que sus cifras cambian con el uso del visor." },
+    { "t": "table", "headers": ["Colección", "Campo", "Tipo", "Significado"], "rows": [
+      ["LigasSoportadas", "liga_id", "int", "id de la competición en FotMob (clave natural)"],
+      ["LigasSoportadas", "nombre", "string", "nombre de la competición"],
+      ["LigasSoportadas", "pais", "string", "código de país de tres letras (ENG, ESP, INT...)"],
+      ["LigasSoportadas", "pais_nombre", "string", "nombre completo del país para mostrar en la interfaz"],
+      ["LigasSoportadas", "tipo", "string", "pais (431 documentos) o internacional (127)"],
+      ["LigasSoportadas", "url", "string", "ruta de la competición en FotMob, por ejemplo /leagues/47/overview/premier-league"],
+      ["TopLigas", "liga_id", "int", "id de la competición (clave natural)"],
+      ["TopLigas", "nombre", "string", "nombre de la competición oficial"],
+      ["TopLigas", "pais", "string", "código de país de la competición"],
+      ["TopLigas", "prioridad", "int", "1 a 5; fija el orden en el selector (índice único)"],
+      ["TopLigas", "partidos_guardados", "int", "partidos de esa liga que hay en PartidosFm; 0 si no está en los días archivados"],
+      ["Paises", "pais", "string", "código de país (clave natural, índice único)"],
+      ["Paises", "nombre", "string", "nombre completo del país"],
+      ["Paises", "ligas", "int", "competiciones de ese país en LigasSoportadas"],
+      ["Paises", "partidos", "int", "partidos guardados de ese país"],
+      ["Paises", "equipos", "int", "equipos distintos de ese país"],
+      ["Equipos", "equipo_id", "int", "id del equipo en FotMob (clave natural, índice único)"],
+      ["Equipos", "nombre", "string", "nombre del equipo (índice nombre_equipo para búsquedas)"],
+      ["Equipos", "pais", "string", "código de país del equipo"],
+      ["Equipos", "ligas", "array", "nombres de las competiciones en las que ha aparecido"],
+      ["Equipos", "partidos", "int", "partidos guardados en los que participó"],
+      ["Equipos", "goles", "int", "goles marcados en esos partidos"],
+      ["Equipos", "ultima_vez", "Date", "fecha del partido más reciente que se guardó de ese equipo"],
+      ["ResumenDiario", "dia", "string", "día en formato yyyymmdd (clave natural, índice único)"],
+      ["ResumenDiario", "partidos", "int", "partidos guardados de ese día"],
+      ["ResumenDiario", "goles", "int", "goles totales del día"],
+      ["ResumenDiario", "en_vivo", "int", "partidos en estado in en el último recálculo"],
+      ["ResumenDiario", "ligas", "int", "competiciones distintas presentes ese día"]
+    ]},
+
+    { "t": "h2", "text": "9.3. Log de peticiones" },
+    { "t": "table", "headers": ["Colección", "Campo", "Tipo", "Significado"], "rows": [
+      ["ConsultasApi", "ruta", "string", "ruta pedida al puente, por ejemplo /api/fm/matches"],
+      ["ConsultasApi", "consulta", "string", "cadena de consulta, por ejemplo ?date=20261125"],
+      ["ConsultasApi", "estado", "int", "código HTTP que devolvió FotMob"],
+      ["ConsultasApi", "ms", "long", "duración de la petición en milisegundos"],
+      ["ConsultasApi", "fecha", "Date", "momento de la petición; el TTL de 7 días se aplica sobre este campo"]
+    ]},
+    { "t": "bullets", "items": [
+      "Los campos llamados json son texto, no subdocumentos: se pueden leer y filtrar con expresiones regulares, pero no con notación de puntos (content.lineup.homeTeam).",
+      "nota, dorsal, temporada y pais_nombre admiten null: la fuente no siempre los publica.",
+      "Las claves naturales (match_id, liga_id, equipo_id, la pareja match_id + jugador_id, dia, pais) son las que usa el código para hacer upsert; el _id nunca se envía desde el cliente."
+    ]},
+
+    { "t": "pagebreak" },
+    { "t": "h1", "text": "10. Anexo A: inventario de colecciones" },
+    { "t": "table", "headers": ["Colección", "Origen", "Documentos", "Contenido"], "rows": [
+      ["Alineaciones", "fuente", "5", "onces publicados por FotMob, con formación y JSON original"],
+      ["ConsultasApi", "log", "44", "peticiones al puente; TTL de 7 días"],
+      ["Equipos", "derivada", "572", "equipos con partidos, goles y ligas acumuladas"],
+      ["Estadisticas", "fuente", "2", "posesión, tiros, córners y demás cifras por partido"],
+      ["Eventos", "fuente", "3", "goles, tarjetas y cambios del partido"],
+      ["Jugadores", "fuente", "85", "estadística individual por jugador y partido"],
+      ["LigasFm", "fuente", "54", "competiciones vistas, con su id de FotMob"],
+      ["LigasSoportadas", "catálogo", "558", "todas las competiciones que soporta el visor"],
+      ["Paises", "derivada", "95", "ligas, partidos y equipos por país"],
+      ["PartidosFm", "fuente", "286", "partidos de los días consultados"],
+      ["ResumenDiario", "derivada", "2", "una fila por día guardado (20261124 y 20261125)"],
+      ["TopLigas", "derivada", "5", "las cinco oficiales con prioridad y partidos guardados"]
+    ]},
+
+    { "t": "h1", "text": "11. Anexo B: limitaciones y notas" },
+    { "t": "bullets", "items": [
+      "El filtro tipo=popular de /api/datos/ligas-soportadas devuelve 0 documentos. Los ids de la lista popular vuelven a aparecer en los bloques de países y el último upsert deja tipo=pais; en la base solo hay pais (431) e internacional (127).",
+      "Las colecciones derivadas solo hacen upsert, nunca borran: un equipo que desaparece de los días guardados conserva sus cifras históricas.",
+      "TopLigas.partidos_guardados puede valer 0 para una de las cinco oficiales si esa competición no aparece en los días guardados. Es un dato real, no un fallo.",
+      "La cobertura de alineaciones depende de FotMob: en la muestra del 20 de noviembre había once en 47 de 90 partidos.",
+      "El payload de alineación, estadísticas y eventos se guarda como texto JSON en el campo json; para consultarlo con notación de puntos habría que guardarlo como subdocumento.",
+      "MongoDB escucha en localhost sin credenciales: es un entorno de desarrollo local, no un despliegue.",
+      "El navegador cachea app.js; si un cambio de interfaz no aparece, hay que recargar con Ctrl+F5."
+    ]},
+
+    { "t": "h1", "text": "12. Anexo C: archivos implicados" },
+    { "t": "table", "headers": ["Archivo", "Responsabilidad"], "rows": [
+      ["src/Api/FuentesController.cs", "puente a FotMob y ESPN, caché de 60 s y llamada al almacén"],
+      ["src/Api/AlmacenFutbol.cs", "escritura con upsert, índices, TTL y recálculo de derivados"],
+      ["src/Api/DatosController.cs", "endpoints de lectura y filtros en /api/datos"],
+      ["src/Api/Program.cs", "arranque, conexión a MongoDB y creación de índices"],
+      ["src/Infrastructure/FootballStatsContext.cs", "acceso a las 12 colecciones"],
+      ["src/Domain/ModelosAlmacen.cs", "modelos y nombres de campo tal como quedan en Mongo"],
+      ["src/Api/wwwroot/app.js", "filtros de interfaz, catálogo de ligas y respaldo con dbGet"],
+      ["src/Api/wwwroot/index.html", "estructura de la portada y de la vista de ligas"]
+    ]}
+  ]
+}

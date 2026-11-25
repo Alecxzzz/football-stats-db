@@ -1,0 +1,23 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Local runtime
+.run/
+*.log
+
+# Mongo dumps
+dump/
+*.bson
+
+# Local secrets
+appsettings.Development.json
+appsettings.Local.json
+.env
+.env.*
+
+# OS
+Thumbs.db
+.DS_Store

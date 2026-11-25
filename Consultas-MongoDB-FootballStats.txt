@@ -1,0 +1,563 @@
+==========================================================================
+ CONSULTAS MONGODB - FOOTBALL STATS DB
+ 12 colecciones, base threesixtybets_db
+ Datos reales al 25/11/2026 (cambian con el uso normal del visor)
+==========================================================================
+
+CONECTARSE
+----------
+  mongosh "mongodb://localhost:27017/threesixtybets_db"
+
+  Si ya se esta dentro de mongosh:
+  use threesixtybets_db
+
+  Comandos generales utiles:
+  show collections                                    -> lista las 12 colecciones
+  db.getCollectionNames().sort()                      -> lo mismo, ordenado
+  db.getCollectionNames().sort().forEach(c => print(c, db.getCollection(c).countDocuments()))
+
+ESTRUCTURA DE CADA FICHA
+------------------------
+  QUE GUARDA  : de donde sale el documento
+  CLAVE       : campo natural del upsert (el que evita duplicados)
+  INDICE      : indice que aprovecha la consulta
+  CONSULTAS   : cada linea trae "->" con lo que hace y lo que devuelve hoy
+
+Las cifras marcadas como "->" son las de esta base el 25/11/2026. Si el visor
+se sigue usando, los partidos y el log crecen y los numeros suben.
+
+
+==========================================================================
+ 1. PartidosFm                                       286 documentos
+==========================================================================
+QUE GUARDA : cada partido del listado diario de FotMob (ruta matches?date=...)
+CLAVE      : match_id            INDICE: match_id_unico (unico), dia_fecha
+CAMPOS     : match_id, dia (yyyymmdd), liga_id, liga, pais, local, visitante,
+             local_id, visitante_id, goles_local, goles_visitante,
+             fecha (Date), estado (pre/in/post), jugando, terminado, actualizado
+
+  db.PartidosFm.countDocuments()
+  -> 286 partidos guardados en total.
+
+  db.PartidosFm.find({ dia: '20261125' }).count()
+  -> 133 partidos del 25/11 (usa el indice dia_fecha).
+
+  db.PartidosFm.find({ dia: '20261124' }).count()
+  -> 153 partidos del 24/11, todos ya terminados.
+
+  db.PartidosFm.countDocuments({ estado: 'post' })
+  -> 153 acabados. Los otros 133 estan en 'pre' (aun no empezaban).
+
+  db.PartidosFm.find({ liga_id: 42 }).count()
+  -> 18 partidos de Champions League (liga_id 42 es el id de FotMob).
+
+  db.PartidosFm.find({ liga_id: 42 }).sort({ fecha: 1 }).limit(5)
+  -> los 5 primeros de Champions por hora; se ve fecha, equipos y marcador.
+
+  db.PartidosFm.find({ fecha: { $gte: ISODate('2026-11-24'), $lt: ISODate('2026-11-26') } }).count()
+  -> 286. Rango por el campo Date (no por el texto dia); es la forma correcta
+     de pedir "estos dos dias".
+
+  db.PartidosFm.findOne({ match_id: 6106421 })
+  -> un partido completo: Sabah FK - Barcelona, Champions, estado pre.
+
+  db.PartidosFm.find({ dia: '20261125' },
+                     { _id: 0, liga: 1, local: 1, visitante: 1,
+                       goles_local: 1, goles_visitante: 1 }).limit(3)
+  -> proyeccion: solo los campos que pinta la portada, sin el _id.
+
+  db.PartidosFm.find({ dia: '20261125' }).explain('executionStats').executionStats
+  -> totalDocsExamined cercano a 133 y no a 286: la consulta pasa por
+     dia_fecha en lugar de recorrer la coleccion entera.
+
+  db.PartidosFm.aggregate([
+    { $group: { _id: '$estado', partidos: { $sum: 1 } } },
+    { $sort: { partidos: -1 } }
+  ])
+  -> [{ _id: 'post', partidos: 153 }, { _id: 'pre', partidos: 133 }]
+
+  db.PartidosFm.aggregate([
+    { $group: { _id: '$liga',
+                partidos: { $sum: 1 },
+                goles: { $sum: { $add: ['$goles_local', '$goles_visitante'] } } } },
+    { $sort: { partidos: -1 } }, { $limit: 5 }
+  ])
+  -> las 5 competiciones con mas partidos guardados y sus goles.
+     Hoy el ranking empieza en 28 partidos y baja hasta 14; Champions
+     (liga_id 42) es la tercera con 18.
+
+  db.PartidosFm.aggregate([
+    { $group: { _id: null, goles: { $sum: { $add: ['$goles_local', '$goles_visitante'] } } } }
+  ])
+  -> 447 goles en total (los 153 partidos del 24/11; el 25/11 aun no se jugo).
+
+
+==========================================================================
+ 2. LigasFm                                           54 documentos
+==========================================================================
+QUE GUARDA : las competiciones que aparecen en el listado del dia o al abrir
+             una clasificacion (rutas matches y leagues)
+CLAVE      : liga_id             INDICE: liga_id_unico (unico)
+CAMPOS     : liga_id, nombre, codigo (id de la edicion), pais, temporada, actualizado
+
+  db.LigasFm.countDocuments()
+  -> 54 competiciones distintas vistas hasta ahora.
+
+  db.LigasFm.find({ liga_id: 42 })
+  -> Champions League, pais INT, codigo 943230 (la edicion concreta).
+     codigo y temporada solo se rellenan cuando se pide leagues?id=...
+
+  db.LigasFm.find({ pais: 'ESP' }).sort({ nombre: 1 })
+  -> las competiciones espanolas que ya se visitaron.
+
+  db.LigasFm.find({ temporada: { $ne: null } })
+  -> solo las que tienen temporada guardada (las abiertas desde clasificacion).
+
+  db.LigasFm.find({ nombre: /liga/i }, { _id: 0, liga_id: 1, nombre: 1, pais: 1 })
+  -> busqueda por texto en el nombre. Sin indice de texto: sobre 54
+     documentos es instantaneo, pero se dice en la exposicion.
+
+  db.LigasFm.aggregate([
+    { $group: { _id: '$pais', ligas: { $sum: 1 } } },
+    { $sort: { ligas: -1 } }, { $limit: 5 }
+  ])
+  -> reparto de las competiciones guardadas por pais.
+
+
+==========================================================================
+ 3. Alineaciones                                       5 documentos
+==========================================================================
+QUE GUARDA : el once que publico FotMob (ruta matchDetails), con el JSON original
+CLAVE      : match_id            INDICE: match_id_unico (unico)
+CAMPOS     : match_id, local, visitante, formacion_local, formacion_visita,
+             titulares, suplentes, json (texto), guardado
+
+  db.Alineaciones.countDocuments()
+  -> 5 partidos con alineacion publicada.
+
+  db.Alineaciones.findOne({ match_id: 5868132 })
+  -> Athletic Club - Espanyol, 4-2-3-1 y 22 titulares (11 + 11).
+
+  db.Alineaciones.find({}, { _id: 0, match_id: 1, local: 1, visitante: 1,
+                             formacion_local: 1, formacion_visita: 1,
+                             titulares: 1, suplentes: 1 })
+  -> tabla de los 5 partidos sin arrastrar el campo json.
+
+  db.Alineaciones.find({ formacion_local: '4-2-3-1' }).count()
+  -> cuantos equipos locales salieron con ese dibujo.
+
+  db.Alineaciones.aggregate([
+    { $project: { match_id: 1, tamano_json: { $strLenCP: '$json' } } },
+    { $sort: { tamano_json: -1 } }
+  ])
+  -> peso en caracteres del payload guardado. Demuestra que json es texto
+     y que se puede medir con operadores de cadena.
+
+  db.Alineaciones.findOne({ match_id: 5868132 }).json.substring(0, 200)
+  -> primeros 200 caracteres del JSON de FotMob tal como se archivo.
+
+
+==========================================================================
+ 4. Estadisticas                                       2 documentos
+==========================================================================
+QUE GUARDA : el bloque content.stats de FotMob (posesion, tiros, corners...)
+CLAVE      : match_id            INDICE: match_id_unico (unico)
+CAMPOS     : match_id, liga, json (texto), guardado
+
+  db.Estadisticas.countDocuments()
+  -> 2 partidos con estadisticas (5868132 LaLiga, 1000024439 Primera A).
+
+  db.Estadisticas.find({}, { _id: 0, match_id: 1, liga: 1 })
+  -> listado corto; el detalle esta en json.
+
+  db.Estadisticas.findOne({ match_id: 1000024439 }).json.substring(0, 300)
+  -> primeras cifras del partido: se ve Periods.All. stats dentro del JSON.
+
+  db.Estadisticas.aggregate([
+    { $project: { match_id: 1, liga: 1, caracteres: { $strLenCP: '$json' } } },
+    { $sort: { caracteres: -1 } }
+  ])
+  -> tamano del bloque de estadisticas de cada partido.
+
+  db.Estadisticas.countDocuments({ liga: 'LaLiga' })
+  -> cuantas fichas de estadisticas son de LaLiga.
+
+
+==========================================================================
+ 5. Eventos                                            3 documentos
+==========================================================================
+QUE GUARDA : la cronologia del partido (goles, tarjetas, cambios)
+CLAVE      : match_id            INDICE: match_id_unico (unico)
+CAMPOS     : match_id, total (eventos), goles, json (texto), guardado
+
+  db.Eventos.countDocuments()
+  -> 3 partidos con cronologia guardada.
+
+  db.Eventos.find({}, { _id: 0, match_id: 1, total: 1, goles: 1 })
+  -> 5868132: 18 eventos y 1 gol; 5887407: 16 y 1; 1000024439: 24 y 5.
+
+  db.Eventos.findOne({ match_id: 5868132 }).json.substring(0, 300)
+  -> los eventos tal cual: tipo, minuto, jugador y equipo.
+
+  db.Eventos.aggregate([
+    { $group: { _id: null, eventos: { $sum: '$total' }, goles: { $sum: '$goles' } } }
+  ])
+  -> 58 eventos y 7 goles sumando los tres partidos.
+
+  db.Eventos.find({ goles: { $gte: 3 } })
+  -> solo los partidos con 3 goles o mas en la cronologia.
+
+  db.Eventos.countDocuments({ match_id: 5868132 })
+  -> 1: el indice unico garantiza una sola cronologia por partido.
+
+
+==========================================================================
+ 6. Jugadores                                         85 documentos
+==========================================================================
+QUE GUARDA : una fila por jugador y partido, con su nodo de playerStats
+CLAVE      : match_id + jugador_id   INDICE: match_jugador_unico (unico)
+CAMPOS     : match_id, jugador_id, nombre, equipo, dorsal, nota, json, actualizado
+
+  db.Jugadores.countDocuments()
+  -> 85 jugadores en 2 partidos con detalle.
+
+  db.Jugadores.find({ match_id: 5868132 }).count()
+  -> 46 jugadores del Athletic - Espanyol (el otro partido aporta 39).
+
+  db.Jugadores.find({ match_id: 5868132 },
+                    { _id: 0, nombre: 1, equipo: 1, dorsal: 1 }).limit(5)
+  -> plantilla guardada, sin el json.
+
+  db.Jugadores.findOne({ jugador_id: 80295 })
+  -> Yuri Berchiche en el partido 5868132 (su ficha individual).
+
+  db.Jugadores.aggregate([
+    { $group: { _id: '$match_id', jugadores: { $sum: 1 } } },
+    { $sort: { jugadores: -1 } }
+  ])
+  -> reparto de documentos por partido: 46 y 39.
+
+  db.Jugadores.find({ nota: { $ne: null } }).count()
+  -> 0. FotMob no mando nota en estos dos partidos, asi que el campo esta
+     vacio; la consulta sirve para explicar que un campo opcional puede
+     no venir y no por eso se borra ni se inventa.
+
+  db.Jugadores.find({ nombre: /messi/i })
+  -> busqueda por nombre; si no hay resultado, es que no jugo en los
+     partidos guardados, no que falte el dato.
+
+  db.Jugadores.countDocuments({ match_id: 5868132, jugador_id: 80295 })
+  -> 1. Es la prueba de la clave compuesta: repetir la peticion actualiza
+     ese documento en lugar de crear otro.
+
+
+==========================================================================
+ 7. LigasSoportadas                                  558 documentos
+==========================================================================
+QUE GUARDA : el catalogo completo de competiciones (ruta allLeagues)
+             popular + internacionales + paises; alimenta la vista #/ligas
+CLAVE      : liga_id             INDICE: liga_id_unico (unico), pais_nombre
+CAMPOS     : liga_id, nombre, pais (ENG, ESP, INT...), pais_nombre,
+             tipo (pais/internacional), url, actualizado
+
+  db.LigasSoportadas.countDocuments()
+  -> 558 competiciones, las mismas que muestra el selector del visor.
+
+  db.LigasSoportadas.countDocuments({ pais: 'ESP' })
+  -> 9 competiciones espanolas (usa el indice pais_nombre).
+
+  db.LigasSoportadas.find({ pais: 'ESP' }, { _id: 0, nombre: 1 }).sort({ nombre: 1 })
+  -> Copa de la Reina, Copa del Rey, LaLiga, LaLiga2, Liga F,
+     Primera Federacion, Segunda Federacion, Supercopa Femenina,
+     Supercopa de Espana.
+
+  db.LigasSoportadas.countDocuments({ nombre: /premier/i })
+  -> 32: todas las competiciones con "Premier" en el nombre (Inglaterra,
+     femenina, sub-21, otras ligas del mundo). La regex NO usa indice.
+
+  db.LigasSoportadas.aggregate([
+    { $group: { _id: '$tipo', competiciones: { $sum: 1 } } }
+  ])
+  -> pais 431, internacional 127. No hay tipo 'popular': los ids de la
+     lista popular vuelven a salir en los bloques de paises y el ultimo
+     upsert deja tipo 'pais'. Es la limitacion conocida del catalogo.
+
+  db.LigasSoportadas.find({ tipo: 'internacional' },
+                          { _id: 0, nombre: 1, pais: 1 }).limit(5)
+  -> Champions League, Europa League, Conference League, selecciones...
+
+  db.LigasSoportadas.find({ pais: 'ENG' },
+                          { _id: 0, nombre: 1 }).sort({ nombre: 1 })
+  -> las 23 competiciones inglesas del catalogo.
+
+  db.LigasSoportadas.findOne({ liga_id: 47 })
+  -> Premier League con su url de FotMob y pais ENG.
+
+
+==========================================================================
+ 8. TopLigas                                           5 documentos
+==========================================================================
+QUE GUARDA : derivada. Las 5 ligas oficiales de referencia con su prioridad
+             y cuantos partidos hay guardados de cada una. Se recalcula
+             leyendo PartidosFm; no la envia ninguna API.
+CLAVE      : liga_id y prioridad   INDICE: liga_id_unico, prioridad_unica
+CAMPOS     : liga_id, nombre, pais, prioridad (1 a 5), partidos_guardados, actualizado
+
+  db.TopLigas.find({}, { _id: 0 }).sort({ prioridad: 1 })
+  -> Premier League, LaLiga, Serie A, Bundesliga, Ligue 1 (en ese orden).
+
+  db.TopLigas.countDocuments()
+  -> 5. Recalcular no crea mas documentos: el upsert actualiza los mismos.
+
+  db.TopLigas.aggregate([
+    { $group: { _id: null, partidos: { $sum: '$partidos_guardados' } } }
+  ])
+  -> 0 hoy: los dos dias guardados son de Champions y ligas sudamericanas,
+     ninguna de las cinco oficiales. El campo es real, no un fallo; al
+     abrir un dia con Premier o LaLiga el numero sube.
+
+  db.TopLigas.find({ partidos_guardados: 0 }).count()
+  -> 5. Sirve para explicar que el derivado se recalcula solo al visitar
+     jornadas, y que un 0 significa "sin partidos en los dias guardados".
+
+  db.TopLigas.findOne({ prioridad: 1 })
+  -> la liga que el visor considera la primera de la lista.
+
+
+==========================================================================
+ 9. Paises                                            95 documentos
+==========================================================================
+QUE GUARDA : derivada. Un documento por pais con cuantas ligas soporta y
+             cuantos partidos y equipos hay guardados de el.
+CLAVE      : pais                 INDICE: pais_unico (unico)
+CAMPOS     : pais, nombre, ligas, partidos, equipos, actualizado
+
+  db.Paises.countDocuments()
+  -> 95 paises (incluye INT, que agrupa las competiciones internacionales).
+
+  db.Paises.find({}, { _id: 0, pais: 1, ligas: 1, partidos: 1 })
+            .sort({ ligas: -1 }).limit(3)
+  -> INT 127 ligas y 82 partidos, ENG 23 y 69, BRA 16 y 3.
+
+  db.Paises.find({ pais: 'ESP' }, { _id: 0 })
+  -> Spain: 9 ligas, 4 partidos, 8 equipos guardados.
+
+  db.Paises.aggregate([
+    { $group: { _id: null, ligas: { $sum: '$ligas' },
+                          partidos: { $sum: '$partidos' },
+                          equipos: { $sum: '$equipos' } } }
+  ])
+  -> { ligas: 558, partidos: 286, equipos: 572 }: cuadra exacto con
+     LigasSoportadas, PartidosFm y Equipos. Es la prueba de que los
+     derivados se calculan desde los datos guardados.
+
+  db.Paises.find({ partidos: { $gt: 0 } }).count()
+  -> paises con al menos un partido guardado.
+
+  db.Paises.find({}, { _id: 0, pais: 1, equipos: 1 }).sort({ equipos: -1 }).limit(3)
+  -> los paises con mas equipos distintos en la base.
+
+
+==========================================================================
+ 10. Equipos                                         572 documentos
+==========================================================================
+QUE GUARDA : derivada. Equipos vistos en PartidosFm, sin repetir, con sus
+             ligas, partidos y goles acumulados.
+CLAVE      : equipo_id            INDICE: equipo_id_unico (unico), nombre_equipo
+CAMPOS     : equipo_id, nombre, pais, ligas (array), partidos, goles,
+             ultima_vez, actualizado
+
+  db.Equipos.countDocuments()
+  -> 572 equipos, es decir los 286 partidos x 2.
+
+  db.Equipos.findOne({}, { _id: 0 })
+  -> Sabah FK: pais INT, ligas ['Champions League'], 1 partido.
+
+  db.Equipos.find({ pais: 'ESP' }, { _id: 0, nombre: 1, partidos: 1 }).limit(5)
+  -> 8 equipos espanoles guardados.
+
+  db.Equipos.find({ nombre: /barcelona/i }, { _id: 0, nombre: 1, pais: 1,
+                                               ligas: 1, partidos: 1 })
+  -> todas las fichas cuyo nombre contiene "barcelona" (usa nombre_equipo
+     solo si la consulta es de igualdad; la regex recorre la coleccion).
+
+  db.Equipos.find({}, { _id: 0, nombre: 1, partidos: 1 })
+            .sort({ partidos: -1 }).limit(3)
+  -> los mas activos; hoy todos tienen 1 porque cada equipo aparece en un
+     solo dia guardado.
+
+  db.Equipos.find({ partidos: { $gt: 1 } }).count()
+  -> 0 hoy: haria falta guardar otro dia con los mismos equipos.
+
+  db.Equipos.aggregate([
+    { $group: { _id: '$pais', equipos: { $sum: 1 } } },
+    { $sort: { equipos: -1 } }, { $limit: 5 }
+  ])
+  -> reparto de equipos por pais; cuadra con la coleccion Paises.
+
+  db.Equipos.findOne({ equipo_id: 951893 })
+  -> ficha por id de FotMob (el indice unico evita duplicados al recalar).
+
+
+==========================================================================
+ 11. ResumenDiario                                     2 documentos
+==========================================================================
+QUE GUARDA : derivada. Una fila por dia con partidos, goles, partidos en
+             vivo y ligas distintas. Evita recorrer PartidosFm para el
+             "resumen del dia".
+CLAVE      : dia                  INDICE: dia_unico (unico)
+CAMPOS     : dia, partidos, goles, en_vivo, ligas, actualizado
+
+  db.ResumenDiario.find({}, { _id: 0 }).sort({ dia: 1 })
+  -> 20261124: 153 partidos, 447 goles, 0 en vivo, 36 ligas.
+     20261125: 133 partidos, 0 goles, 0 en vivo, 38 ligas.
+
+  db.ResumenDiario.findOne({ dia: '20261124' })
+  -> la fila completa del dia con mas actividad.
+
+  db.ResumenDiario.aggregate([
+    { $group: { _id: null, partidos: { $sum: '$partidos' },
+                          goles: { $sum: '$goles' } } }
+  ])
+  -> 286 partidos y 447 goles: cuadra exacto con PartidosFm.
+
+  db.ResumenDiario.find({ goles: { $gt: 100 } })
+  -> solo los dias con mas de 100 goles (hoy, el 24/11).
+
+  db.ResumenDiario.find({ en_vivo: { $gt: 0 } })
+  -> dias con partidos en juego en el momento del guardado; si esta vacio,
+     es que se consulto fuera del horario de juego.
+
+  Comparacion con la fuente (para demostrar que el derivado no miente):
+  db.PartidosFm.countDocuments({ dia: '20261124' })          -> 153
+  db.ResumenDiario.findOne({ dia: '20261124' }).partidos     -> 153
+
+
+==========================================================================
+ 12. ConsultasApi                                      44 documentos
+==========================================================================
+QUE GUARDA : log. Una fila por peticion al puente (ruta, query, estado HTTP,
+             milisegundos, fecha). Se borra sola a los 7 dias (TTL).
+CLAVE      : _id (insercion normal, no upsert)  INDICE: ttl_7_dias
+CAMPOS     : ruta, consulta, estado, ms (Long), fecha
+
+  db.ConsultasApi.countDocuments()
+  -> 44 peticiones registradas desde el arranque.
+
+  db.ConsultasApi.find({}, { _id: 0, ruta: 1, consulta: 1, estado: 1 })
+            .sort({ fecha: -1 }).limit(5)
+  -> las 5 ultimas peticiones, de la mas reciente a la mas antigua.
+
+  db.ConsultasApi.aggregate([
+    { $group: { _id: '$ruta', peticiones: { $sum: 1 } } },
+    { $sort: { peticiones: -1 } }
+  ])
+  -> /api/fm/matches 28, /api/fm/matchDetails 13, /api/fm/allLeagues 2,
+     /api/fm/leagues 1.
+
+  db.ConsultasApi.find({ estado: { $ne: 200 } })
+  -> peticiones que no devolvieron 200; vacio = la fuente respondio bien.
+
+  db.ConsultasApi.find({}, { _id: 0, ruta: 1, ms: 1 }).sort({ ms: -1 }).limit(3)
+  -> las 3 mas lentas. ms se guarda como Long (en mongosh sale con high/low).
+
+  db.ConsultasApi.getIndexes()
+  -> ttl_7_dias con expireAfterSeconds: 604800 (7 dias).
+
+  db.ConsultasApi.find({ fecha: { $lt: new Date(Date.now() - 7*24*60*60*1000) } }).count()
+  -> 0 siempre: lo que tuviera mas de 7 dias ya lo borro MongoDB, no la app.
+
+  db.ConsultasApi.countDocuments({ consulta: /date=20261125/ })
+  -> cuantas veces se pidio esa jornada al puente.
+
+
+==========================================================================
+ 13. INDICES Y TTL (para el paso de "esto esta optimizado")
+==========================================================================
+  db.PartidosFm.getIndexes()
+  -> _id_, match_id_unico (unique), dia_fecha.
+
+  db.LigasSoportadas.getIndexes()
+  -> _id_, liga_id_unico, pais_nombre.
+
+  db.Jugadores.getIndexes()
+  -> _id_, match_jugador_unico (match_id + jugador_id).
+
+  db.Equipos.getIndexes()
+  -> _id_, equipo_id_unico, nombre_equipo.
+
+  db.ConsultasApi.getIndexes().filter(i => i.expireAfterSeconds !== undefined)
+  -> el unico TTL del sistema.
+
+  db.getCollectionNames().sort().forEach(function (c) {
+    print(c, db.getCollection(c).getIndexes().map(function (i) { return i.name; }).join(', '));
+  })
+  -> todos los indices de todas las colecciones en una sola salida.
+
+
+==========================================================================
+ 14. CONSULTAS QUE CRUZAN COLECCIONES (cierre de la exposicion)
+==========================================================================
+  // un partido, su alineacion y su cronologia
+  var id = db.Alineaciones.findOne().match_id;
+  printjson(db.PartidosFm.findOne({ match_id: id }, { _id: 0, local: 1, visitante: 1,
+                                                     liga: 1, goles_local: 1, goles_visitante: 1 }));
+  printjson(db.Alineaciones.findOne({ match_id: id }, { _id: 0, formacion_local: 1,
+                                                       formacion_visita: 1, titulares: 1 }));
+  printjson(db.Eventos.findOne({ match_id: id }, { _id: 0, total: 1, goles: 1 }));
+
+  // un pais: catalogo, equipos y partidos guardados
+  printjson(db.Paises.findOne({ pais: 'ESP' }, { _id: 0 }));
+  db.LigasSoportadas.find({ pais: 'ESP' }, { _id: 0, nombre: 1 }).count();
+  db.Equipos.find({ pais: 'ESP' }, { _id: 0, nombre: 1 }).count();
+
+  // el derivado Paises contrastado con Equipos mediante $lookup
+  db.Paises.aggregate([
+    { $match: { pais: { $in: ['ESP', 'ENG'] } } },
+    { $lookup: { from: 'Equipos', localField: 'pais',
+                 foreignField: 'pais', as: 'docs' } },
+    { $project: { _id: 0, pais: 1, equiposDeclarados: '$equipos',
+                  equiposEncontrados: { $size: '$docs' } } }
+  ])
+  -> ENG 138/138 y ESP 8/8: el numero que guarda Paises coincide con los
+     documentos reales de Equipos para ese pais.
+
+  La idea que se explica aqui: el mismo dato se ve en la web, se pide por
+  HTTP y se consulta en mongosh, porque todo sale del mismo almacen.
+
+
+==========================================================================
+ 15. EQUIVALENTES POR HTTP (si se prefiere no abrir mongosh)
+==========================================================================
+  curl -s 'http://localhost:5080/api/datos/resumen'
+  curl -s 'http://localhost:5080/api/datos/partidos?fecha=20261125'
+  curl -s 'http://localhost:5080/api/datos/partidos?desde=2026-11-24&hasta=2026-11-25'
+  curl -s 'http://localhost:5080/api/datos/top-ligas'
+  curl -s 'http://localhost:5080/api/datos/paises?limite=5'
+  curl -s 'http://localhost:5080/api/datos/equipos?pais=ESP&limite=5'
+  curl -s 'http://localhost:5080/api/datos/resumen-diario'
+  curl -s 'http://localhost:5080/api/datos/ligas-soportadas?pais=ESP'
+  curl -s 'http://localhost:5080/api/datos/ligas-soportadas?q=premier'
+  curl -s 'http://localhost:5080/api/datos/detalle/5868132'
+  curl -s 'http://localhost:5080/api/datos/consultas?limite=5'
+  curl -s -X POST 'http://localhost:5080/api/datos/recalcular'
+  -> {"status":"ok","topLigas":5,"equipos":572,"paises":95,"dias":2}
+
+
+==========================================================================
+ CIFRAS DE REFERENCIA (25/11/2026)
+==========================================================================
+  Alineaciones        5
+  ConsultasApi       44
+  Equipos           572
+  Estadisticas        2
+  Eventos             3
+  Jugadores          85
+  LigasFm            54
+  LigasSoportadas   558
+  Paises             95
+  PartidosFm        286
+  ResumenDiario       2
+  TopLigas            5
+  Total             1 711 documentos en 12 colecciones
+==========================================================================

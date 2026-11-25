@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: football-stats-db
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ConnectionStrings__Mongo
+        sync: false
+      - key: DatabaseName
+        value: threesixtybets_db
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production

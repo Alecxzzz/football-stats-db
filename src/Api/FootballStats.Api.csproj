@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>FootballStats.API</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Domain\FootballStats.Domain.csproj" />
+    <ProjectReference Include="..\Infrastructure\FootballStats.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Los scripts de seed viven en el proyecto aparte SeedProject y no forman parte de la API -->
+    <Compile Remove="SeedData*.cs" />
+    <Compile Remove="SeedProject/**/*.cs" />
+    <Content Remove="SeedProject/**" />
+    <None Remove="SeedProject/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MongoDB.Driver" Version="3.0.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.4.0" />
+  </ItemGroup>
+
+</Project>

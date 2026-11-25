@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>360 Stats · Estadísticas de fútbol</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/" id="brand">
+      <span class="brand-mark">360</span>
+      <span class="brand-text"><strong>Stats</strong><small>estadísticas de fútbol</small></span>
+    </a>
+
+    <nav class="days" id="days">
+      <button type="button" data-offset="-1">Ayer</button>
+      <button type="button" data-offset="0" class="active">Hoy</button>
+      <button type="button" data-offset="1">Mañana</button>
+    </nav>
+
+    <div class="top-actions">
+      <label class="league-select">
+        <select id="leagueFilter">
+          <option value="">Todas las ligas</option>
+        </select>
+      </label>
+      <label class="search">
+        <input id="search" type="search" placeholder="Buscar equipo o liga" autocomplete="off">
+      </label>
+      <span class="live-pill" id="livePill"><span class="pulse"></span><b id="liveCount">0</b> en vivo</span>
+    </div>
+  </header>
+
+  <main class="layout" id="homeView">
+    <section class="content">
+      <div class="content-head">
+        <div>
+          <h1 id="title">Partidos de hoy</h1>
+          <p id="subtitle" class="muted">Cargando…</p>
+        </div>
+        <button id="refresh" class="ghost-btn" type="button">Actualizar</button>
+      </div>
+
+      <section id="highlights" class="highlights hidden"></section>
+
+      <div id="liveBox" class="live-box hidden">
+        <div class="live-box-head"><span class="pulse"></span> En vivo ahora</div>
+        <div id="liveList"></div>
+      </div>
+
+      <div id="list" class="list"></div>
+
+      <div id="empty" class="empty hidden">
+        <strong>Sin partidos para mostrar</strong>
+        <span>La API no devolvió partidos para este día y esta competición.</span>
+      </div>
+    </section>
+
+    <aside class="rail">
+      <section class="card">
+        <h2>Resumen del día</h2>
+        <div class="kpis" id="kpis"></div>
+      </section>
+
+      <section class="card">
+        <h2>Partidos por liga</h2>
+        <div id="chart"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Competiciones</h2>
+          <a class="ghost-btn small" href="#/ligas">Ver todas</a>
+        </div>
+        <ul class="leagues" id="leagues"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <section id="detailView" class="wrap hidden"></section>
+
+  <section id="ligasView" class="wrap hidden"></section>
+
+  <script src="./app.js?v=20261125c"></script>
+</body>
+</html>
