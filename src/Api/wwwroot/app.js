@@ -1498,18 +1498,77 @@ function shotMapHTML(tiros, homeName, awayName) {
     </section>`;
 }
 
-/* ---------- pestaña: radar (Live Match Tracker de FotMob) ---------- */
-// FotMob pinta el radar del partido con el "Live Match Tracker" de Sportradar:
-// un campo con el balón, los ataques y las acciones, minuto a minuto. El visor
-// pide esos mismos datos al servidor (/api/radar/{srMatchId}), que firma el
-// acceso igual que FotMob y devuelve solo lo necesario para dibujarlo.
-const RADAR_MS = 15000;
-let radarTimer = null;
+/* ---------- pestaña: radar (widget de Sportradar, el mismo que usa FotMob) ---------- */
+// FotMob no dibuja el radar: monta el "Live Match Tracker" de Sportradar con
+// su SDK. Aquí se hace igual, así que el campo, el balón y las acciones se
+// mueven solos (el widget pide match_timelinedelta cada pocos segundos).
+const SIR_KEY = "44ea55a6918bd96cab0f7c854ad171ab";
+const SIR_LOADER = `https://widgets.sir.sportradar.com/${SIR_KEY}/widgetloader`;
+const SIR_CONFIG = {
+  vlmtForce2d: true,
+  pitchView: "top",
+  vlmtLightPitchView: "top",
+  layout: "topdown",
+  disableWidgetHeader: true,
+  disableComponents: false,
+  momentum: "disable",
+  scoreboard: "disable",
+  disableFooterStats: true,
+  disableEventStats: true,
+  tabs: { 1: ["statistics"] },
+  tabsPosition: "disable",
+  collapseTo: "pitch",
+  expanded: false,
+  hideExpand: true,
+  disableOverlayPanels: true,
+  vlmtEnableMilestones: false,
+  detailedScoreboard: "disable",
+};
 
+let sirCarga = null;
+let radarHost = null;
+
+function cargarSIR() {
+  if (window.SIR && !window.SIR.q) return Promise.resolve(true);
+  if (sirCarga) return sirCarga;
+  if (!window.SIR) {
+    const stub = function () {
+      (stub.q = stub.q || []).push(arguments);
+    };
+    stub.l = Date.now();
+    window.SIR = stub;
+  }
+  sirCarga = new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = SIR_LOADER;
+    s.dataset.sirLoader = "1";
+    const esperar = (ms) => {
+      const t0 = Date.now();
+      const t = setInterval(() => {
+        const listo = window.SIR && !window.SIR.q;
+        if (listo || Date.now() - t0 > ms) {
+          clearInterval(t);
+          resolve(listo);
+        }
+      }, 80);
+    };
+    s.onload = () => esperar(4000);
+    s.onerror = () => esperar(1000);
+    document.head.appendChild(s);
+  });
+  return sirCarga;
+}
+
+/** Suelta el widget al cambiar de pestaña o de partido (si no, sigue pidiendo datos). */
 function stopRadar() {
-  if (radarTimer) {
-    clearInterval(radarTimer);
-    radarTimer = null;
+  const host = radarHost;
+  radarHost = null;
+  if (!host) return;
+  try {
+    window.SIR && window.SIR("removeWidget", host);
+  } catch {
+    /* el widget ya no existía */
   }
 }
 
@@ -1530,116 +1589,29 @@ async function loadRadar(sr) {
   }
 }
 
-const RADAR_TIPOS = {
-  goal: { cls: "goal", label: "Gol" },
-  shotontarget: { cls: "shot on", label: "Tiro a puerta" },
-  shotofftarget: { cls: "shot", label: "Tiro" },
-  shotblocked: { cls: "shot", label: "Tiro bloqueado" },
-  corner: { cls: "corner", label: "Córner" },
-  card: { cls: "tarjeta", label: "Tarjeta" },
-};
+async function montarLMT(sr) {
+  let host = null;
+  for (let i = 0; i < 60 && !host; i++) {
+    if (state.tab !== "radar" || state.view !== "detail") return;
+    host = document.querySelector("#panel .lmt-host");
+    if (!host) await new Promise((r) => setTimeout(r, 50));
+  }
+  if (!host) return;
 
-function radarHTML(data) {
-  const local = data.local || {};
-  const visita = data.visitante || {};
-  const cuenta = data.cuenta || {};
-  const raw = state.game?.raw;
-  const colorOf = (side) =>
-    raw?.teams?.find((t) => t.homeAway === side)?.color || (side === "home" ? "#22d07a" : "#3a7aff");
-  const homeColor = colorOf("home");
-  const awayColor = colorOf("away");
+  const listo = await cargarSIR();
+  if (!host.isConnected || state.tab !== "radar") return;
+  if (!listo) {
+    host.innerHTML = `<p class="muted small">No se pudo cargar el radar de Sportradar. Revisa la conexión y recarga.</p>`;
+    return;
+  }
 
-  // Sportradar manda las coordenadas sobre el campo entero: el local ataca
-  // hacia la derecha y el visitante hacia la izquierda, sin espejar nada.
-  const pos = (e) => ({
-    x: Math.min(99, Math.max(1, e.x)),
-    y: Math.min(99, Math.max(1, e.y)),
-  });
-
-  // Un aro blanco sobre un balón blanco no se ve: si el color del equipo es
-  // muy claro se usa el fondo oscuro para el borde.
-  const ring = (color) => {
-    const m = String(color || "").match(/^#([0-9a-f]{6})$/i);
-    if (!m) return color;
-    const n = parseInt(m[1], 16);
-    const lum = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
-    return lum > 205 ? "#0a0e13" : color;
-  };
-
-  const eventos = (data.eventos || [])
-    .filter((e) => RADAR_TIPOS[e.tipo] && e.x != null && e.y != null)
-    .slice(-45)
-    .map((e) => {
-      const tipo = RADAR_TIPOS[e.tipo];
-      const p = pos(e);
-      const titulo = `${e.min != null ? `${e.min}' ` : ""}${tipo.label}${e.jugador ? ` · ${e.jugador}` : ""}`;
-      return `<span class="rp-dot ${tipo.cls}" style="left:${p.x.toFixed(1)}%;top:${p.y.toFixed(1)}%" title="${esc(
-        titulo
-      )}"></span>`;
-    })
-    .join("");
-
-  const balon = data.balon
-    ? (() => {
-        const p = pos(data.balon);
-        const color = data.balon.equipo === "home" ? homeColor : awayColor;
-        return `<span class="rp-ball" style="left:${p.x.toFixed(1)}%;top:${p.y.toFixed(
-          1
-        )}%;--ball:${esc(ring(color))}" title="Balón"></span>`;
-      })()
-    : "";
-
-  const chips = [
-    ["Tiros", cuenta.tiros],
-    ["A puerta", cuenta.aPuerta],
-    ["Córners", cuenta.corners],
-    ["Tarjetas", cuenta.tarjetas],
-  ]
-    .filter(([, par]) => Array.isArray(par))
-    .map(
-      ([label, par]) =>
-        `<span class="rp-chip"><b>${esc(label)}</b> ${esc(txt(par[0]))} · ${esc(txt(par[1]))}</span>`
-    )
-    .join("");
-
-  const marcador =
-    local.marcador != null && visita.marcador != null ? `${local.marcador} - ${visita.marcador}` : "–";
-  const reloj = data.minuto != null ? `${data.minuto}'` : data.estado || "";
-
-  const line = 'stroke="rgba(255,255,255,.18)" stroke-width="0.4" fill="none"';
-  return `
-    <section class="dcard radar-live">
-      <h3>Radar en vivo ${data.enVivo ? '<span class="rp-live"><i></i>en directo</span>' : ""}</h3>
-      <div class="rp-head">
-        <span class="rp-team"><i style="background:${esc(homeColor)}"></i>${esc(local.nombre || "Local")}</span>
-        <b class="rp-score">${esc(marcador)}</b>
-        <span class="rp-team a">${esc(visita.nombre || "Visitante")}<i style="background:${esc(
-    awayColor
-  )}"></i></span>
-      </div>
-      <div class="rp-clock">${esc(reloj)}</div>
-      <div class="rp-pitch">
-        <svg viewBox="0 0 100 64" preserveAspectRatio="none" role="img" aria-label="Radar del partido">
-          <line x1="50" y1="0" x2="50" y2="64" ${line} />
-          <circle cx="50" cy="32" r="9" ${line} />
-          <rect x="0" y="20" width="16" height="24" ${line} />
-          <rect x="0" y="27" width="5.5" height="10" ${line} />
-          <rect x="84" y="20" width="16" height="24" ${line} />
-          <rect x="94.5" y="27" width="5.5" height="10" ${line} />
-        </svg>
-        ${eventos}
-        ${balon}
-      </div>
-      <div class="rp-legend">
-        <span><i class="rp-key goal"></i>Gol</span>
-        <span><i class="rp-key shot"></i>Tiro</span>
-        <span><i class="rp-key corner"></i>Córner</span>
-        <span><i class="rp-key tarjeta"></i>Tarjeta</span>
-        <span><i class="rp-key ball"></i>Balón</span>
-      </div>
-      <div class="rp-chips">${chips}</div>
-      <p class="muted small radar-note">Datos de Sportradar (Live Match Tracker), los mismos que usa FotMob. Se actualiza cada 15 s.</p>
-    </section>`;
+  stopRadar();
+  radarHost = host;
+  try {
+    window.SIR("addWidget", host, "match.lmtPlus", { ...SIR_CONFIG, matchId: Number(sr), lang: "es" });
+  } catch (err) {
+    host.innerHTML = `<p class="muted small">El radar no arrancó: ${esc(err.message)}</p>`;
+  }
 }
 
 async function panelRadar(id) {
@@ -1657,19 +1629,31 @@ async function panelRadar(id) {
     return emptyHTML("Sin radar en vivo", data?.motivo || "El radar no devolvió datos de este partido.");
   }
 
-  stopRadar();
-  radarTimer = setInterval(async () => {
-    const host = document.querySelector("#panel .radar-live");
-    // Se para al cambiar de pestaña o al salir del partido.
-    if (state.tab !== "radar" || state.view !== "detail" || !host) {
-      stopRadar();
-      return;
-    }
-    const nuevo = await loadRadar(sr);
-    if (host.isConnected && nuevo?.ok) host.outerHTML = radarHTML(nuevo);
-  }, RADAR_MS);
+  const local = data.local || {};
+  const visita = data.visitante || {};
+  const raw = state.game?.raw;
+  const colorOf = (side) =>
+    raw?.teams?.find((t) => t.homeAway === side)?.color || (side === "home" ? "#22d07a" : "#3a7aff");
+  const marcador =
+    local.marcador != null && visita.marcador != null ? `${local.marcador} - ${visita.marcador}` : "–";
+  const reloj = data.minuto != null ? `${data.minuto}'` : data.estado || "";
 
-  return radarHTML(data);
+  setTimeout(() => montarLMT(sr), 0);
+
+  return `
+    <section class="dcard radar-live">
+      <h3>Radar en vivo ${data.enVivo ? '<span class="rp-live"><i></i>en directo</span>' : ""}</h3>
+      <div class="rp-head">
+        <span class="rp-team"><i style="background:${esc(colorOf("home"))}"></i>${esc(local.nombre || "Local")}</span>
+        <span class="rp-clock">${esc(reloj)}</span>
+        <b class="rp-score">${esc(marcador)}</b>
+        <span class="rp-team a">${esc(visita.nombre || "Visitante")}<i style="background:${esc(
+    colorOf("away")
+  )}"></i></span>
+      </div>
+      <div class="lmt-host" id="lmtHost"><p class="muted small">Cargando el radar de Sportradar…</p></div>
+      <p class="muted small radar-note">Widget de Sportradar (Live Match Tracker), el mismo que usa FotMob. Se actualiza solo.</p>
+    </section>`;
 }
 
 async function panelEstadisticas(id, league) {

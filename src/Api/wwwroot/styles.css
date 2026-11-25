@@ -859,8 +859,8 @@ a { color: inherit; text-decoration: none; }
   margin-right: 5px;
 }
 
-/* radar en vivo (Live Match Tracker de Sportradar/FotMob) */
-.radar-live { display: flex; flex-direction: column; gap: 8px; }
+/* radar en vivo (widget Live Match Tracker de Sportradar) */
+.radar-live { display: flex; flex-direction: column; gap: 10px; }
 
 .rp-live {
   display: inline-flex;
@@ -887,7 +887,7 @@ a { color: inherit; text-decoration: none; }
 
 .rp-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   font-size: 13px;
@@ -906,65 +906,22 @@ a { color: inherit; text-decoration: none; }
 .rp-team.a { justify-content: flex-end; }
 .rp-team i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 
-.rp-score { font-size: 18px; font-variant-numeric: tabular-nums; }
-.rp-clock { text-align: center; font-size: 12px; color: var(--muted); margin: -4px 0 2px; }
+.rp-score { font-size: 16px; font-variant-numeric: tabular-nums; }
+.rp-clock { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-.rp-pitch {
+/* el widget se queda con el ancho de la tarjeta y una altura fija */
+.lmt-host {
   position: relative;
+  width: 100%;
+  height: clamp(320px, 54vh, 520px);
   border-radius: 10px;
-  border: 1px solid #17573a;
-  background: linear-gradient(180deg, #0f3b23, #0a2a19);
-  aspect-ratio: 100 / 64;
   overflow: hidden;
+  background: #2a7235;
 }
 
-.rp-pitch svg { display: block; width: 100%; height: 100%; }
-
-.rp-dot {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: #dfe8f2;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
-}
-
-.rp-dot.shot { width: 7px; height: 7px; background: #bfd0e2; }
-.rp-dot.shot.on { width: 8px; height: 8px; background: #fff; }
-.rp-dot.goal { width: 12px; height: 12px; background: var(--accent); box-shadow: 0 0 0 2px #fff; }
-.rp-dot.corner { width: 6px; height: 6px; border-radius: 1px; background: var(--warn); }
-.rp-dot.tarjeta { width: 5px; height: 7px; border-radius: 1px; background: #f5d641; }
-
-.rp-ball {
-  position: absolute;
-  width: 11px;
-  height: 11px;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: #fff;
-  border: 3px solid var(--ball, var(--accent));
-  box-shadow: 0 0 8px rgba(0, 0, 0, 0.55);
-}
-
-.rp-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.rp-legend span { display: inline-flex; align-items: center; gap: 5px; }
-
-.rp-key { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
-.rp-key.goal { background: var(--accent); box-shadow: 0 0 0 1px #fff; }
-.rp-key.shot { background: #bfd0e2; }
-.rp-key.corner { background: var(--warn); border-radius: 1px; }
-.rp-key.tarjeta { background: #f5d641; border-radius: 1px; }
-.rp-key.ball { background: #fff; box-shadow: 0 0 0 2px var(--accent); }
-
-.rp-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.rp-chip { font-size: 11.5px; padding: 4px 9px; border-radius: 999px; background: var(--bg-soft); border: 1px solid var(--line); }
-.rp-chip b { color: var(--muted); font-weight: 600; margin-right: 3px; }
+.lmt-host > p { padding: 12px; }
+.lmt-host iframe,
+.lmt-host svg { max-width: 100%; }
 
 .radar-note { margin: 0; }
 

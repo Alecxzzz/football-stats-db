@@ -296,7 +296,9 @@ public class RadarController : ControllerBase
                     continue;
                 }
 
-                if (type is not ("goal" or "shotontarget" or "shotofftarget" or "shotblocked" or "corner" or "card"))
+                if (type is not ("goal" or "shotontarget" or "shotofftarget" or "shotblocked" or "corner" or "card"
+                    or "goalkick" or "throwin" or "freekick" or "freekick_taken" or "offside" or "penalty"
+                    or "penalty_awarded" or "substitution"))
                     continue;
 
                 var x = Int(e, "X");
@@ -307,6 +309,7 @@ public class RadarController : ControllerBase
                 eventos.Add(new
                 {
                     tipo = type,
+                    nombre = Str(e, "name"),
                     equipo = team,
                     x,
                     y,
